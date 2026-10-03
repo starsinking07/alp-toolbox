@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QIcon
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton,
     QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
@@ -235,26 +235,46 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(self.wrappers[key])
         self.switch_page('status')
 
-        # 托盘
+        # 托盘 (原生 Win11 菜单: 信息行 + 温控曲线子菜单 + 智能变频)
         self.tray = QSystemTrayIcon(_make_app_icon())
         menu = QMenu()
-        a_show = QAction('打开 工具箱', self)
+        a_show = QAction('打开 Alp 工具箱', self)
         a_show.triggered.connect(self._show)
+        menu.addAction(a_show)
+        menu.addSeparator()
+
+        # 信息行 (常亮显示, 点击无动作)
+        self.tray_info = {}
+        for key in ('device', 'cpu_t', 'gpu_t', 'cpu_p', 'gpu_p', 'rpm'):
+            a = QAction('—', self)
+            self.tray_info[key] = a
+            menu.addAction(a)
+        menu.addSeparator()
+
+        self.menu_curve = QMenu('温控曲线', self)
+        self.menu_curve.aboutToShow.connect(self._rebuild_curve_menu)
+        menu.addMenu(self.menu_curve)
+
         a_curve = QAction('智能变频', self)
         a_curve.setCheckable(True)
         a_curve.setChecked(cfg.curve_enabled)
         a_curve.toggled.connect(self._tray_curve)
-        a_quit = QAction('退出', self)
-        a_quit.triggered.connect(QApplication.quit)
-        menu.addAction(a_show)
         menu.addAction(a_curve)
         menu.addSeparator()
+
+        a_quit = QAction('退出 Alp 工具箱', self)
+        a_quit.triggered.connect(QApplication.quit)
         menu.addAction(a_quit)
+
         self.tray.setContextMenu(menu)
         self.tray.setToolTip(APP_NAME)
         self.tray.activated.connect(self._tray_activated)
         self._tray_curve_action = a_curve
         self.tray.show()
+
+        self._tray_timer = QTimer(self)
+        self._tray_timer.timeout.connect(self._update_tray_info)
+        self._tray_timer.start(1000)
 
         # 快捷键
         self.hotkeys = None
@@ -306,7 +326,6 @@ class MainWindow(QMainWindow):
         self.cfg.dark = dark
         self.ctx['dark'] = dark
         self.ctx['theme'] = self.theme_tokens()
-        QApplication.instance().setStyleSheet(build_qss(dark))
         for page in (self.pages['status'], self.pages['curve']):
             page.set_dark(dark)
         self.sidebar.apply_theme(dark)
@@ -328,8 +347,8 @@ class MainWindow(QMainWindow):
 
     def _on_hotkey(self, hk_id: int):
         if hk_id == HK_CYCLE_GEAR:
-            self._gear_idx = (self._gear_idx + 1) % 4
-            presets = ['低噪', '平衡', '强效', '超频']
+            self._gear_idx = (self._gear_idx + 1) % 5
+            presets = ['低噪', '平衡', '强效', '超频', '极限']
             rpm = self.cfg.presets.get(presets[self._gear_idx], 1600)
             self.worker.apply_fixed_rpm(rpm)
             self.worker.gear_light_hook(self._gear_idx)
@@ -348,10 +367,46 @@ class MainWindow(QMainWindow):
         if reason == QSystemTrayIcon.Trigger:
             self._show()
 
+    def _update_tray_info(self):
+        """托盘信息行 1s 刷新: 设备状态 / 温度 / 功耗 / 转速"""
+        t = self.worker.temps
+        conn = self.worker.device.connected
+        rpm = self.last_rpm or 0
+
+        def fmt(v, unit):
+            return f'{v:.0f}{unit}' if v and v > 0 else '无数据'
+
+        self.tray_info['device'].setText(f'风神 Pro: {"已连接" if conn else "未连接"}')
+        self.tray_info['cpu_t'].setText(f'CPU 温度: {fmt(t.cpu, "°C")}')
+        self.tray_info['gpu_t'].setText(f'GPU 温度: {fmt(t.gpu, "°C")}')
+        self.tray_info['cpu_p'].setText(f'CPU 功耗: {fmt(t.cpu_power, " W")}')
+        self.tray_info['gpu_p'].setText(f'GPU 功耗: {fmt(t.gpu_power, " W")}')
+        self.tray_info['rpm'].setText(f'风扇转速: {rpm} RPM' if rpm else '风扇转速: 无数据')
+
+    def _rebuild_curve_menu(self):
+        """温控曲线子菜单: 每次展开时按当前方案重建"""
+        m = self.menu_curve
+        m.clear()
+        active = self.cfg.curve_active
+        for name in ['默认'] + sorted(self.cfg.curve_profiles.keys()):
+            a = QAction(name, self)
+            a.setCheckable(True)
+            a.setChecked(name == active)
+            a.triggered.connect(lambda _=False, n=name: self._switch_profile(n))
+            m.addAction(a)
+
+    def _switch_profile(self, name):
+        """托盘切换曲线方案: 与曲线页同一入口, 编辑器/缓存自动同步"""
+        try:
+            self.pages['curve']._profile_switched(name)
+        except Exception:
+            pass
+
     def _tray_curve(self, on: bool):
         self.cfg.curve_enabled = on
         self.cfg.save()
         self.pages['status'].sync_smart(on)
+        self.pages['curve'].sync_smart(on)
         self.pages['control'].sync_smart(on)
         self._tray_curve_action.setChecked(on)
         self.titlebar.on_mode(on)

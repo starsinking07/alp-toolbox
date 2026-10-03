@@ -10,7 +10,8 @@ DEFAULT_PRESETS = {
     '低噪': 1100,
     '平衡': 1600,
     '强效': 2100,
-    '超频': 2800,
+    '超频': 4000,
+    '极限': 4800,
 }
 
 DEFAULT_CURVE = [(40, 1000), (55, 1500), (70, 2100), (85, 2800)]
@@ -21,6 +22,7 @@ class Config:
     # ---- 连接 ----
     conn_type: str = 'usb'              # 'usb' | 'ble'
     auto_switch: bool = True            # 拔线自动切蓝牙, 插线自动切回 USB
+    ble_address: str = ''               # 最近一次成功连接的散热器蓝牙地址 (直连免广播)
     # ---- 外观 ----
     dark: bool = False
     # ---- 风扇 ----

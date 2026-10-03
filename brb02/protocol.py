@@ -118,7 +118,7 @@ def set_cooling_fixed(rpm: int, level: int = 1) -> bytes:
     帧: [A5][09][24][00][00][level][rpm16][ck]
     ⚠️ 第三参数是制冷档位 01-04 (同时决定 TEC 强度与风扇上限, L4 曲线上限 4000),
     不是开关; rpm 范围随档位不同 (L1 上限 2800, L4 曲线上限 4000)。"""
-    rpm = max(0, min(4000, int(rpm)))
+    rpm = max(0, min(4800, int(rpm)))
     level = max(1, min(4, int(level)))
     return build_frame(Cmd.SET_COOLING_CONFIG,
                        bytes([0x00, 0x00, level, rpm & 0xFF, (rpm >> 8) & 0xFF]))

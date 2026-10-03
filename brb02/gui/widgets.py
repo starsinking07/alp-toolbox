@@ -266,7 +266,7 @@ class FanIcon(QWidget):
         self._timer.timeout.connect(self._tick)
         self._rpm = 0
 
-    def set_rpm(self, rpm: int, max_rpm: int = 2800):
+    def set_rpm(self, rpm: int, max_rpm: int = 4800):
         self._rpm = rpm
         pct = max(0.0, min(1.0, rpm / max_rpm)) if max_rpm else 0
         period = 0 if pct <= 0 else (0.48 if pct >= 0.9 else 0.72 if pct >= 0.7 else 1.0 if pct >= 0.45 else 1.35)

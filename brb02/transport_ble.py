@@ -153,7 +153,7 @@ async def scan_for_cooler(timeout: float = 8.0) -> Optional[str]:
 
 
 if __name__ == '__main__':
-    import sys
+    import sys, os
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from brb02 import protocol

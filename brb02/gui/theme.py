@@ -92,7 +92,7 @@ def _chevron_path(dark: bool) -> str:
 def build_qss(dark: bool) -> str:
     t = DARK if dark else LIGHT
     chevron = _chevron_path(dark).replace('\\', '/')
-    return f"""
+    qss = f"""
 * {{
     font-family: "Manrope", "Microsoft YaHei UI", "Segoe UI", sans-serif;
     outline: none;
@@ -270,3 +270,6 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
 QScrollArea {{ background: transparent; border: none; }}
 """
+    return qss
+
+

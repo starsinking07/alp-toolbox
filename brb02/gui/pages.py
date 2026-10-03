@@ -24,8 +24,9 @@ from .widgets import FanIcon, SemiGauge, Toggle, make_card
 GEARS = [
     ('静音', '#10b981'), ('标准', '#3b82f6'),
     ('强劲', '#a855f7'), ('超频', '#f97316'),
+    ('极限', '#ef4444'),
 ]
-MAX_RPM = 2800
+MAX_RPM = 4800
 GEAR_SUB = [0.70, 0.85, 1.0]
 
 
@@ -279,7 +280,26 @@ class StatusPage(QWidget):
             gw.dark = dark
 
     def sync_smart(self, on: bool):
+        self.tgl_smart.blockSignals(True)
         self.tgl_smart.setChecked(on)
+        self.tgl_smart.blockSignals(False)
+        self.refresh_mode_labels()
+
+    def refresh_mode_labels(self):
+        """模式相关标签以 cfg.curve_enabled 为唯一数据源, 开关切换时立即刷新"""
+        smart = self.ctx['cfg'].curve_enabled
+        if smart:
+            self.lbl_mode.setText('智能变频 · 根据实时温度自动调节转速')
+            self.stat_lbls['控制模式'].setText('智能变频')
+            self.stat_lbls['工作模式'].setText('曲线目标')
+            target = self.ctx['worker']._last_sent_rpm
+            if target:
+                self.stat_lbls['目标转速'].setText(f'{target} RPM')
+        else:
+            self.lbl_mode.setText(f'手动模式 · 当前固定 {self.ctx["cfg"].fixed_rpm} RPM')
+            self.stat_lbls['控制模式'].setText('手动模式')
+            self.stat_lbls['工作模式'].setText('固定转速')
+            self.stat_lbls['目标转速'].setText(f'{self.ctx["cfg"].fixed_rpm} RPM')
 
     def _disconnect(self):
         if self.ctx['main'].is_connected:
@@ -305,12 +325,13 @@ class StatusPage(QWidget):
         self.stat_lbls['当前转速'].setText(f'{rpm} RPM')
         self.update_power(rpm)
 
-    _POWER_CURVE = ((0, 1.5), (1200, 1.5), (2134, 3.0), (2800, 7.6), (2912, 7.6), (3534, 10.6))
+    _POWER_CURVE = ((0, 1.5), (1200, 1.5), (2134, 3.0), (2800, 7.6), (2912, 7.6), (3534, 10.6), (4000, 12.5), (4800, 15.0))
 
     @staticmethod
     def _est_cooler_power(rpm: int) -> float:
         """散热器功耗估算 (W): 2026-10-02 功耗计实测标定 (蓝牙独立供电 15.1V, 无热负载)。
-        实测点: 1200→1.5 / 2134→3.0 / 2800→7.6 / 2912→7.6 / 3534→10.6, 分段线性插值。
+        实测点: 1200→1.5 / 2134→3.0 / 2800→7.6 / 2912→7.6 / 3534→10.6, 分段线性插值;
+        4000→12.5 为外推值 (实测最高到 3534)。
         注: 当前工具箱固定使用制冷档位 1 (0x24 level), 档位对功耗的影响待多档位联动接入。"""
         pts = StatusPage._POWER_CURVE
         r = max(0, min(int(rpm), pts[-1][0]))
@@ -371,7 +392,7 @@ class StatusPage(QWidget):
             self.lbl_mode.setText(f'手动模式 · 当前固定 {c.get("rpm")} RPM')
         self.stat_lbls['控制模式'].setText('智能变频' if smart else '手动模式')
         if c:
-            self.stat_lbls['工作模式'].setText('固定转速')
+            self.stat_lbls['工作模式'].setText('曲线目标' if smart else '固定转速')
             self.stat_lbls['目标转速'].setText(f'{c.get("rpm")} RPM')
         self.mini_curve.set_curve(self.ctx['main'].curve_pct())
 
@@ -383,6 +404,7 @@ class GearSlider(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.level = 4
+        self.n = len(GEARS) * 3
         self.setMinimumHeight(72)
 
     def paintEvent(self, ev):
@@ -396,8 +418,9 @@ class GearSlider(QWidget):
         f = QFont()
         f.setPointSize(8)
         p.setFont(f)
-        for k in range(12):
-            x = track_l + (track_r - track_l) * k / 11
+        n = self.n
+        for k in range(n):
+            x = track_l + (track_r - track_l) * k / (n - 1)
             color = GEARS[k // 3][1]
             r = 10 if k == self.level else 7
             p.setBrush(QColor(color))
@@ -411,8 +434,8 @@ class GearSlider(QWidget):
     def mousePressEvent(self, ev):
         w = self.width()
         track_l, track_r = 30, w - 30
-        k = round((ev.position().x() - track_l) / (track_r - track_l) * 11)
-        self.level = max(0, min(11, k))
+        k = round((ev.position().x() - track_l) / (track_r - track_l) * (self.n - 1))
+        self.level = max(0, min(self.n - 1, k))
         self.update()
         if self.levelSelected:
             self.levelSelected(self.level)
@@ -485,7 +508,7 @@ class HistoryChart(QWidget):
             y = pad_t + plot_h * frac
             p.setPen(QPen(grid, 1))
             p.drawLine(int(pad_l), int(y), int(w - pad_r), int(y))
-        for frac, lbl in ((0.0, '0'), (0.25, '700'), (0.5, '1400'), (0.75, '2100'), (1.0, '2800')):
+        for frac, lbl in ((0.0, '0'), (0.25, '1200'), (0.5, '2400'), (0.75, '3600'), (1.0, '4800')):
             y = pad_t + plot_h * frac
             p.setPen(tick)
             p.drawText(QRectF(0, y - 8, pad_l - 8, 16), Qt.AlignRight | Qt.AlignVCenter, lbl + 'RPM')
@@ -656,7 +679,7 @@ class CurvePage(QWidget):
         v.addWidget(prof)
 
         # 手动挡位
-        gears, _, gv = _card('手动挡位', '点击挡位或 12 点滑条立即下发固定转速')
+        gears, _, gv = _card('手动挡位', '点击挡位或 15 点滑条立即下发固定转速')
         gear_row = QHBoxLayout()
         gear_row.setSpacing(12)
         self.gear_btns = []
@@ -670,6 +693,8 @@ class CurvePage(QWidget):
             b.setStyleSheet(
                 f'QPushButton#GearBtn:checked {{ border-color:{color}; }}')
             b.setText(f'{name}\n{self._gear_rpm(i)} RPM')
+            if name == '极限':
+                b.setToolTip('超出官方规格 (4000 RPM), 风扇满载磨损自负; 运行时命令不写 flash')
             self.gear_group.addButton(b, i)
             gear_row.addWidget(b)
             self.gear_btns.append(b)
@@ -686,7 +711,7 @@ class CurvePage(QWidget):
         self.curve = CurveEditor(self.dark)
         self.curve.changed = self._curve_changed
         ev_.addWidget(self.curve)
-        tip = QLabel('拖动圆点调整各温度点的转速 (%) · 实际转速 = 百分比 × 2800')
+        tip = QLabel('拖动圆点调整各温度点的转速 (%) · 实际转速 = 百分比 × 4800')
         tip.setObjectName('CardHint')
         ev_.addWidget(tip)
         v.addWidget(editor)
@@ -809,13 +834,14 @@ class CurvePage(QWidget):
         if not name:
             return
         cfg.curve_active = name
-        if name == '默认':
-            cfg.curve = [[t, int(p / 100 * MAX_RPM)] for t, p in zip(TEMPS, DEFAULT_PCT)]
-        else:
-            cfg.curve = [list(x) for x in cfg.curve_profiles[name]]
+        if name != '默认':
+            # 具名方案: 载入该方案的曲线
+            cfg.curve = [list(x) for x in cfg.curve_profiles.get(name, cfg.curve)]
+        # '默认' = 当前工作曲线, 不重置 (恢复出厂曲线请点"重置"按钮)
         cfg.save()
         self.ctx['main'].refresh_curve_cache()
         self.curve.set_curve(cfg.curve)
+        self._reload_profiles()   # 同步下拉框 (托盘/外部切换时页面跟随)
 
     def _profile_new(self):
         cfg = self.ctx['cfg']
@@ -839,7 +865,7 @@ class CurvePage(QWidget):
 
     # ---- 挡位 ----
     def _gear_rpm(self, gear: int) -> int:
-        return self.ctx['cfg'].presets.get(GEARS[gear][0], [1100, 1600, 2100, 2800][gear])
+        return self.ctx['cfg'].presets.get(GEARS[gear][0], [1100, 1600, 2100, 4000, 4800][gear])
 
     def _gear_clicked(self, gear: int):
         rpm = self._gear_rpm(gear)
@@ -862,7 +888,9 @@ class CurvePage(QWidget):
         self.ctx['main'].sync_curve_toggle(on)
 
     def sync_smart(self, on):
+        self.tgl_smart2.blockSignals(True)
         self.tgl_smart2.setChecked(on)
+        self.tgl_smart2.blockSignals(False)
 
     def _curve_changed(self, pct_list):
         cfg = self.ctx['cfg']
@@ -1197,7 +1225,9 @@ class ControlPage(QWidget):
 
     # ---- 槽 ----
     def sync_smart(self, on):
+        self.tgl_curve.blockSignals(True)
         self.tgl_curve.setChecked(on)
+        self.tgl_curve.blockSignals(False)
 
     def on_info(self, info: dict):
         c = info.get('cooling')

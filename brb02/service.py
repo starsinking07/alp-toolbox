@@ -17,7 +17,7 @@ from .device import Brb02Device
 from .temps import TempReader
 
 TEMPS_ANCHORS = list(range(20, 111, 5))     # 19 锚点, 与曲线编辑器对齐
-MAX_RPM = 2800
+MAX_RPM = 4800
 
 
 # ---- 前台进程名 (ctypes, 免 psutil 依赖) ----
@@ -61,12 +61,15 @@ class DeviceWorker(QThread):
         super().__init__(parent)
         self.config = config
         self.device = Brb02Device(config.conn_type)
+        if config.ble_address:
+            self.device.ble_address = config.ble_address   # 记忆地址, 启动可蓝牙直连
         self.temps = TempReader()
         self._stop = False
         self._paused = False
         self._reconnect_req: str | None = None
         self._auto_probe_ts = 0.0
         self._switch_cooldown_until = 0.0
+        self._direct_try_ts = 0.0
         self._last_sent_rpm: int | None = None
         self._last_send_ts = 0.0
         self._last_scene_key = None
@@ -125,11 +128,16 @@ class DeviceWorker(QThread):
         # GUI 的重连/换通道请求
         if self._reconnect_req is not None:
             self.device.conn_type = self._reconnect_req
+            self.config.conn_type = self._reconnect_req    # 通道切换持久化
+            self.config.save()
             self._reconnect_req = None
             self.device.disconnect()
             self._last_sent_rpm = None
         if not self.device.connected:
             if not self._connect():
+                # 配置通道上没有设备: 启动/重连失败同样做双向探测 (双通道识别)
+                if self.config.auto_switch:
+                    self._auto_switch_tick(time.time(), False)
                 self.msleep(1500)
                 return
         st = self.device.poll_report(0.45)
@@ -370,9 +378,27 @@ class DeviceWorker(QThread):
                     self.connectionChanged.emit(False, '检测到 USB 接入, 切换到有线模式...')
                     self._reconnect_req = 'usb'
         else:
-            # USB 模式: 已连接则不动; 断线时每 5 秒扫描一次蓝牙广播
+            # USB 模式: 已连接则不动; 断线时先按记忆地址蓝牙直连, 再每 5 秒扫描广播
             if self.device.connected:
                 return
+            # ① 记忆地址直连 (设备断链后短时间内仍可连, 无需广播; 15 秒最多试一次)
+            if self.config.ble_address and now - self._direct_try_ts >= 15.0:
+                self._direct_try_ts = now
+                self.device.conn_type = 'ble'
+                self.device.ble_address = self.config.ble_address
+                self.connectionChanged.emit(False, 'USB 未发现散热器, 尝试蓝牙直连 (记忆地址)...')
+                try:
+                    if self.device.connect():
+                        self._switch_cooldown_until = now + 12
+                        self.config.conn_type = 'ble'
+                        self.config.save()
+                        self.connectionChanged.emit(True, 'USB 不在线, 已通过蓝牙直连散热器')
+                        return
+                except Exception:
+                    pass
+                self.device.conn_type = 'usb'
+                self.connectionChanged.emit(False, '蓝牙直连未成功, 继续 USB 探测...')
+            # ② 每 5 秒扫描一次蓝牙广播
             if now - self._auto_probe_ts >= 5.0:
                 self._auto_probe_ts = now
                 from .transport_ble import scan_for_cooler
@@ -380,6 +406,9 @@ class DeviceWorker(QThread):
                 if addr:
                     self._switch_cooldown_until = now + 12
                     self.device.ble_address = addr
+                    self.config.ble_address = addr
+                    self.config.conn_type = 'ble'
+                    self.config.save()
                     self.connectionChanged.emit(
                         False, 'USB 已断开, 发现蓝牙广播 —— 自动切换到蓝牙模式...')
                     self._reconnect_req = 'ble'
@@ -428,8 +457,7 @@ class DeviceWorker(QThread):
                 pass
         else:
             self.connectionChanged.emit(
-                False, '蓝牙未发现广播 —— 请长按散热器按键 3-5 秒后, 再点一次"重连"'
-                if self.device.conn_type == 'ble' else '未找到散热器 (请用 USB 连接)')
+                False, '未找到散热器 (USB / 蓝牙均未在线; 蓝牙请长按散热器按键 3-5 秒后重试)')
         return ok
 
     def request_reconnect(self, conn_type: str):
@@ -502,11 +530,11 @@ class DeviceWorker(QThread):
             from .logbuf import LOGBUF
             LOGBUF.write(f'[灯效] 写入失败: {e}')
 
-    GEAR_RGB = [(16, 185, 129), (59, 130, 246), (168, 85, 247), (249, 115, 22)]
+    GEAR_RGB = [(16, 185, 129), (59, 130, 246), (168, 85, 247), (249, 115, 22), (239, 68, 68)]
 
     def gear_light_hook(self, gear: int):
         """挡位灯联动 (功能 #8): 换挡时把灯色调成对应挡位色
-        (静音绿 / 标准蓝 / 强劲紫 / 超频橙, 与曲线页 GEARS 配色一致)。
+        (静音绿 / 标准蓝 / 强劲紫 / 超频橙 / 极限红, 与曲线页 GEARS 配色一致)。
         写入格式 2026-10-02 USBPcap 实测, 见 protocol.set_rgb_color。"""
         if not self.config.gear_light:
             return

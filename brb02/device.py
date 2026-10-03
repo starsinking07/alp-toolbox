@@ -13,7 +13,7 @@ from .transport_usb import TransportUSB, find_device
 class Brb02Device:
     """散热器设备对象。所有帧均按已验证协议构建。支持 USB / BLE 双通道。"""
 
-    MAX_RPM = 2800
+    MAX_RPM = 4800
 
     def __init__(self, conn_type: str = 'usb'):
         self.conn_type = conn_type          # 'usb' | 'ble'
@@ -66,6 +66,8 @@ class Brb02Device:
     # ---- 底层 ----
     def _send(self, frame: bytes, wait_s: float = 0.45, max_rx: int = 6) -> list:
         """发送并收集应答。USB 通道会补零到 65 字节; BLE 直接发帧本身。"""
+        if self._t is None:      # 未连接 (启动初期/断线) 时静默忽略, 防止 None.write 崩溃
+            return []
         with self._lock:
             self._t.write(frame)
             time.sleep(wait_s)
@@ -152,10 +154,13 @@ class Brb02Device:
 
     # ---- 控制 ----
     def set_fixed_rpm(self, rpm: int):
-        """设置固定转速 (0..2800)。已实测验证。"""
+        """设置固定转速 (0..4000)。rpm>2800 时自动使用制冷档位 4 (高档曲线才支持 4000)。"""
         rpm = max(0, min(self.MAX_RPM, int(rpm)))
-        self._send(protocol.set_cooling_fixed(rpm), wait_s=0.3)
+        level = 4 if rpm > 2800 else 1
+        self._send(protocol.set_cooling_fixed(rpm, level=level), wait_s=0.3)
 
     def set_curve(self, anchors):
-        """写入智能变频曲线 (4 锚点)。⚠️ 只允许写入来自 get_curve 的合法值。"""
-        self._send(protocol.set_cooling_curve(anchors), wait_s=0.3)
+        """写入智能变频曲线 (4 锚点)。⚠️ 只允许写入来自 get_curve 的合法值。
+        峰值转速 >2800 时自动使用制冷档位 4 (高档曲线才支持 4000)。"""
+        level = 4 if max(r for _t, r in anchors) > 2800 else 1
+        self._send(protocol.set_cooling_curve(anchors, level=level), wait_s=0.3)

@@ -15,7 +15,7 @@ class CurveEditor(QWidget):
 
     changed = None          # callable(list[int])
 
-    def __init__(self, dark=False, max_rpm=2800, rpm_axis=False, parent=None):
+    def __init__(self, dark=False, max_rpm=4800, rpm_axis=False, parent=None):
         super().__init__(parent)
         self.dark = dark
         self.max_rpm = max_rpm
@@ -46,7 +46,7 @@ class CurveEditor(QWidget):
 
     # ---- 数据 ----
     @staticmethod
-    def resample_pairs(pairs, max_rpm: int = 2800) -> list[int]:
+    def resample_pairs(pairs, max_rpm: int = 4800) -> list[int]:
         """任意 (温度, 转速) 对 -> 19 锚点百分比 (线性插值)"""
         pts = sorted((float(t), float(r)) for t, r in pairs) or [(40, 1000)]
         out = []
