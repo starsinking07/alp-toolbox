@@ -26,7 +26,7 @@ HEADER = 0xA5
 
 # ---- 已验证命令号 ----
 class Cmd:
-    ISSUE_SYSTEM_INFO      = 0x07   # △ 心跳/温度推送 (格式细节待最终确认)
+    ISSUE_SYSTEM_INFO      = 0x07   # ✓ 主机参数推送 (屏幕参数页数据源, 见 build_host_info)
     SYSTEM_INFO_REPORT     = 0x06   # ✓ 设备主动上报: [06][rpm_lo][rpm_hi][flag][ck]
     GET_FIRMWARE_VERSION   = 0xC1   # ✓ [A5][04][C1][6A]
     GET_RGB_SWITCH         = 0x11   # ✓ [A5][04][11][BA] -> [05][11][on][x]
@@ -234,3 +234,27 @@ def set_rgb_color(cfg_head: bytes, rgb: tuple[int, int, int]) -> bytes:
     r, g, b = rgb
     params = bytes(cfg_head[:5]) + bytes([r & 0xFF, g & 0xFF, b & 0xFF])
     return build_frame(Cmd.SET_RGB_EFFECTS, params)
+
+
+def build_host_info(entries: list[tuple[int, int]]) -> bytes:
+    """0x07 主机参数推送 —— 散热器屏幕参数页的唯一数据源, 官方 1-9Hz 持续推;
+    第三方从不推则参数页纯白 (本工具箱白屏问题的根因)。
+
+    帧: [A5][1A][07][项数] + 项数×[ID][值lo][值hi] + [CK], 官方 7 项 = 26 字节。
+    ID 语义 (cap6 152s/153 帧 USBPcap 实测, tools/analyze_07_ids.py):
+      00=CPU温(73-78) 01=CPU功(42-43, 疑, 备选负载%) 02=GPU功(17-25, 疑, 备选负载%)
+      03=未明(0-13 跳动, 疑磁盘) 04=官方跳过不发 05=未明(恒74, 疑内存%)
+      06=GPU温(52-54) 07=时钟=当日分钟数 (1108 = 18:28 与抓包时刻吻合; 屏幕按
+      值/60:值%60 渲染, 误发 HHMM 会显示 PM 33:58, 用户实测定案)。
+    ⚠️ 早期抓包曾误判为 5×f32 全零保活信封 —— 值全零时两种视图字节相同,
+    cap6 真值帧定案为 [ID][值16LE] 结构。"""
+    params = bytes([len(entries) & 0xFF])
+    for k, v in entries:
+        v = max(0, min(0xFFFF, int(v)))
+        params += bytes([k & 0xFF, v & 0xFF, (v >> 8) & 0xFF])
+    return build_frame(Cmd.ISSUE_SYSTEM_INFO, params)
+
+
+def set_control_source(src: int = 0x01) -> bytes:
+    """0x22 控制源 set (实测; 01=PC 主机)。官方会话开场发一次, replay_07 同款前置。"""
+    return build_frame(0x22, bytes([src & 0xFF]))

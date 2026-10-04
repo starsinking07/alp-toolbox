@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import colorsys
+import os
 import sys
 import time
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QGraphicsOpacityEffect
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QApplication, QSlider,
-    QSizePolicy, QSpinBox, QStackedWidget,
+    QLabel, QLineEdit, QPlainTextEdit, QProgressBar, QPushButton, QApplication,
+    QSlider, QSizePolicy, QSpinBox, QStackedWidget,
     QVBoxLayout, QWidget,
 )
 
 from .curve_editor import CurveEditor, TEMPS, DEFAULT_PCT
 from brb02 import protocol
+from brb02.diagnostics import APP_VERSION
 from brb02.logbuf import LOGBUF
 from .theme import chart_color, temp_color
 from .widgets import FanIcon, SemiGauge, Toggle, make_card
@@ -108,6 +111,20 @@ def _pill(text: str, color: str, bg_alpha=0.12) -> QLabel:
         f'{int(color[5:7],16)},{bg_alpha}); border-radius:11px; padding:3px 12px;')
     lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
     return lbl
+
+
+def _dim_widget(w: QWidget, dim: bool, tip: str = ''):
+    """依赖禁用的可视化: 透明度压暗 + tooltip 说明 (自定义 QSS 不渲染 disabled 态)。"""
+    w.setEnabled(not dim)
+    w.setToolTip(tip)
+    if dim:
+        eff = w.graphicsEffect()
+        if not isinstance(eff, QGraphicsOpacityEffect):
+            eff = QGraphicsOpacityEffect(w)
+            w.setGraphicsEffect(eff)
+        eff.setOpacity(0.45)
+    elif w.graphicsEffect() is not None:
+        w.setGraphicsEffect(None)
 
 
 # ================= 状态页 =================
@@ -440,6 +457,11 @@ class GearSlider(QWidget):
         if self.levelSelected:
             self.levelSelected(self.level)
 
+    def set_level(self, k: int):
+        """程序化设置选中点 (挡位卡 ↔ 滑条双向同步用)。"""
+        self.level = max(0, min(self.n - 1, int(k)))
+        self.update()
+
 
 class SeriesPill(QPushButton):
     def __init__(self, label: str, color: str):
@@ -704,7 +726,12 @@ class CurvePage(QWidget):
         self.slider12 = GearSlider()
         self.slider12.levelSelected = self._level_selected
         gv.addWidget(self.slider12)
+        self.lbl_manual_hint = QLabel('智能变频运行中 — 手动挡位暂不可调 (关闭「智能变频」后可调)')
+        self.lbl_manual_hint.setObjectName('CardHint')
+        self.lbl_manual_hint.setWordWrap(True)
+        gv.addWidget(self.lbl_manual_hint)
         v.addWidget(gears)
+        self._sync_manual_enabled()
 
         # 曲线编辑器
         editor, _, ev_ = _card(None)
@@ -873,6 +900,7 @@ class CurvePage(QWidget):
         self.ctx['worker'].gear_light_hook(gear)
         self.ctx['cfg'].fixed_rpm = rpm
         self.ctx['cfg'].save()
+        self.slider12.set_level(gear * 3 + 2)        # 挡位卡 → 滑条同步 (预设满档点)
 
     def _level_selected(self, k: int):
         gear, sub = k // 3, k % 3
@@ -881,16 +909,27 @@ class CurvePage(QWidget):
         self.ctx['worker'].gear_light_hook(gear)
         self.ctx['cfg'].fixed_rpm = rpm
         self.ctx['cfg'].save()
+        self.gear_btns[gear].setChecked(True)        # 滑条 → 挡位卡同步 (基础挡位)
+
+    def _sync_manual_enabled(self):
+        """智能变频开启时手动挡位禁用 (自动控温时手动调挡会被曲线覆盖)。"""
+        on = bool(self.ctx['cfg'].curve_enabled)
+        for b in self.gear_btns:
+            b.setEnabled(not on)
+        self.slider12.setEnabled(not on)
+        self.lbl_manual_hint.setVisible(on)
 
     def _smart_toggled(self, on):
         self.ctx['cfg'].curve_enabled = on
         self.ctx['cfg'].save()
         self.ctx['main'].sync_curve_toggle(on)
+        self._sync_manual_enabled()
 
     def sync_smart(self, on):
         self.tgl_smart2.blockSignals(True)
         self.tgl_smart2.setChecked(on)
         self.tgl_smart2.blockSignals(False)
+        self._sync_manual_enabled()
 
     def _curve_changed(self, pct_list):
         cfg = self.ctx['cfg']
@@ -1115,14 +1154,44 @@ class ControlPage(QWidget):
         self.tgl_curve = Toggle(cfg.curve_enabled)
         self.tgl_curve.toggled = self._curve_toggled
         cv2.addWidget(_setting_row('自动温度控制', '根据温度曲线自动调节风扇速度', '🎚️', self.tgl_curve))
+        # TEC 自动档位
+        self.tgl_tec = Toggle(cfg.tec_auto_enabled)
+        self.tgl_tec.toggled = self._tec_toggled
+        cv2.addWidget(_setting_row('TEC 自动档位', '半导体制冷随温度自动升/降档 (独立于风扇曲线)', '🧊', self.tgl_tec))
+        thr_w = QWidget()
+        th = QHBoxLayout(thr_w)
+        th.setContentsMargins(0, 0, 0, 0)
+        th.setSpacing(6)
+        self.tec_spins = []
+        for lbl in ('L2 ≥', 'L3 ≥', 'L4 ≥'):
+            cap = QLabel(lbl)
+            cap.setObjectName('StatVal')
+            th.addWidget(cap)
+            sp = QSpinBox()
+            sp.setRange(30, 100)
+            sp.setSuffix('°C')
+            sp.setFixedWidth(66)
+            sp.setAlignment(Qt.AlignCenter)
+            self.tec_spins.append(sp)
+            th.addWidget(sp)
+        for sp, v in zip(self.tec_spins, (cfg.tec_thresholds or [55, 65, 75])):
+            sp.setValue(v)
+        for sp in self.tec_spins:
+            sp.valueChanged.connect(self._tec_thr_changed)
+        thr_w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.row_tec_thr = _setting_row('TEC 档位阈值', '达到温度升档, 回落 2°C 降档', '📐', thr_w)
+        cv2.addWidget(self.row_tec_thr)
         self.cmb_smooth = QComboBox()
         self.cmb_smooth.addItems(['1 · 即时跟随', '2 · 弱平滑', '3 · 默认', '5 · 较强平滑', '10 · 强平滑'])
         self.cmb_smooth.setCurrentIndex({1: 0, 2: 1, 3: 2, 5: 3, 10: 4}.get(cfg.temp_smoothing, 2))
         self.cmb_smooth.currentIndexChanged.connect(self._smooth_changed)
-        cv2.addWidget(_setting_row('温度平滑度', 'EMA 指数加权: 越大越稳, 越小越跟手', '🌊', self.cmb_smooth))
+        self.row_smooth = _setting_row('温度平滑度', 'EMA 指数加权: 越大越稳, 越小越跟手', '🌊', self.cmb_smooth)
+        cv2.addWidget(self.row_smooth)
         self.tgl_spike = Toggle(cfg.spike_filter)
         self.tgl_spike.toggled = self._spike_changed
-        cv2.addWidget(_setting_row('温度尖峰过滤', '忽略单次异常跳温, 避免误触发控制', '🛡️', self.tgl_spike))
+        self.row_spike = _setting_row('温度尖峰过滤', '忽略单次异常跳温, 避免误触发控制', '🛡️', self.tgl_spike)
+        cv2.addWidget(self.row_spike)
+        self._sync_setting_deps()
         self.tgl_restore = Toggle(cfg.restore_on_start)
         self.tgl_restore.toggled = self._restore_toggled
         cv2.addWidget(_setting_row('启动时应用上次转速', '', '⚡', self.tgl_restore))
@@ -1221,13 +1290,80 @@ class ControlPage(QWidget):
         sv.addWidget(card3)
         sv.addStretch(1)
 
-        return [('设备设置', dev), ('风扇控制', fan), ('灯效', light), ('系统设置', sysw)]
+        # --- 散热器屏幕 (信息卡默认; 情境卡片开关; 自定义在"屏幕图片"页) ---
+        hint = QWidget()
+        hv = QVBoxLayout(hint)
+        hv.setContentsMargins(0, 0, 0, 0)
+        hv.setSpacing(10)
+        card5, _, cv5 = _card(
+            '散热器屏幕',
+            '默认显示信息卡: CPU / GPU 型号 + 日期, 每次连接自动更新 (一天至多两次写入)。')
+        self.tgl_cards = Toggle(getattr(cfg, 'screen_cards', True))
+        self.tgl_cards.toggled = self._cards_toggled
+        cv5.addWidget(_setting_row(
+            '情境卡片',
+            '全屏游戏时自动切游戏卡; CPU/GPU ≥85°C 推警报卡; 关闭则恒显信息卡',
+            '🃏', self.tgl_cards))
+        self.tgl_card_auto = Toggle(getattr(cfg, 'screen_card_auto', True))
+        self.tgl_card_auto.toggled = self._card_auto_toggled
+        cv5.addWidget(_setting_row(
+            '信息卡自动上屏',
+            '连接时自动显示信息卡 (型号+日期); 关闭后仅手动上传/恢复时更新屏幕',
+            '🪪', self.tgl_card_auto))
+        tip = QLabel(
+            '想放自己的图片? 到侧栏「屏幕图片」页上传 —— 上传后屏幕保持你的图片, '
+            '随时点该页的「恢复信息卡」切回默认。任意两次上屏间隔 ≥2 分钟 (保护屏幕 flash)。'
+            '仅 USB 通道支持屏幕上传。')
+        tip.setObjectName('CardHint')
+        tip.setWordWrap(True)
+        cv5.addWidget(tip)
+        hv.addWidget(card5)
+        hv.addStretch(1)
+
+        return [('设备设置', dev), ('风扇控制', fan), ('灯效', light),
+                ('系统设置', sysw), ('散热器屏幕', hint)]
 
     # ---- 槽 ----
     def sync_smart(self, on):
         self.tgl_curve.blockSignals(True)
         self.tgl_curve.setChecked(on)
         self.tgl_curve.blockSignals(False)
+
+    def _tec_toggled(self, on):
+        cfg = self.ctx['cfg']
+        cfg.tec_auto_enabled = on
+        cfg.save()
+        self._sync_setting_deps()
+
+    def _sync_setting_deps(self):
+        """设置项连带禁用 (用户原则: 子设置依附主开关):
+        温度平滑度/尖峰过滤 依附 自动温度控制; TEC 档位阈值 依附 TEC 自动档位。"""
+        cfg = self.ctx['cfg']
+        curve_on = bool(cfg.curve_enabled)
+        tec_on = bool(cfg.tec_auto_enabled)
+        _dim_widget(self.row_smooth, not curve_on, '开启「自动温度控制」后可调')
+        _dim_widget(self.row_spike, not curve_on, '开启「自动温度控制」后可调')
+        _dim_widget(self.row_tec_thr, not tec_on, '开启「TEC 自动档位」后可调')
+        for sp in self.tec_spins:
+            sp.setEnabled(tec_on)
+
+    def _tec_thr_changed(self, *_):
+        cfg = self.ctx['cfg']
+        cfg.tec_thresholds = sorted(sp.value() for sp in self.tec_spins)
+        cfg.save()
+
+    # ---- 散热器屏幕 ----
+    # (v3.32: 屏幕内容 = 情境卡片(信息卡/游戏卡/警报卡, 默认) / 自定义图片(屏幕图片页))
+
+    def _cards_toggled(self, on):
+        cfg = self.ctx['cfg']
+        cfg.screen_cards = on
+        cfg.save()
+
+    def _card_auto_toggled(self, on):
+        cfg = self.ctx['cfg']
+        cfg.screen_card_auto = on
+        cfg.save()
 
     def on_info(self, info: dict):
         c = info.get('cooling')
@@ -1236,6 +1372,7 @@ class ControlPage(QWidget):
         self.lbl_mode2.setText(f"控制模式  {'智能变频' if self.ctx['cfg'].curve_enabled else '手动'}")
         conn = self.ctx['main'].is_connected
         self.lbl_dev_state.setText('已连接' if conn else '未连接')
+        self._sync_setting_deps()
 
     def on_temps(self, cpu, gpu):
         self.lbl_cpu_val.setText(f'{cpu:.0f}°C' if cpu else '--°C')
@@ -1263,6 +1400,7 @@ class ControlPage(QWidget):
         self.ctx['cfg'].curve_enabled = on
         self.ctx['cfg'].save()
         self.ctx['main'].sync_curve_toggle(on)
+        self._sync_setting_deps()
 
     def _smooth_changed(self, idx):
         self.ctx['cfg'].temp_smoothing = [1, 2, 3, 5, 10][idx]
@@ -1415,6 +1553,7 @@ class DevicePage(QWidget):
 class AboutPage(QWidget):
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
+        self.ctx = ctx
         v = QVBoxLayout(self)
         v.setContentsMargins(6, 4, 6, 6)
         v.setSpacing(16)
@@ -1426,7 +1565,7 @@ class AboutPage(QWidget):
         desc.setWordWrap(True)
         desc.setObjectName('CardHint')
         cv.addWidget(desc)
-        ver = QLabel('UI 设计参考: FanControlPortable (Eureka-o, MIT License) · 协议为本机独立逆向成果')
+        ver = QLabel(f'v{APP_VERSION} · UI 设计参考: FanControlPortable (Eureka-o, MIT License) · 协议为本机独立逆向成果')
         ver.setObjectName('CardHint')
         cv.addWidget(ver)
         v.addWidget(card)
@@ -1443,9 +1582,12 @@ class AboutPage(QWidget):
         brow = QHBoxLayout()
         b_copy = QPushButton('复制全部')
         b_copy.clicked.connect(self._copy_log)
+        b_diag = QPushButton('导出诊断包')
+        b_diag.clicked.connect(self._export_diag)
         b_clear = QPushButton('清空')
         b_clear.clicked.connect(self._clear_log)
         brow.addWidget(b_copy)
+        brow.addWidget(b_diag)
         brow.addWidget(b_clear)
         brow.addStretch(1)
         lv.addLayout(brow)
@@ -1469,6 +1611,280 @@ class AboutPage(QWidget):
         from brb02.logbuf import LOGBUF as _LB
         QApplication.clipboard().setText(_LB.text())
 
+    def _export_diag(self):
+        from PySide6.QtWidgets import QFileDialog
+        default = f'alp-diagnostics-{time.strftime("%Y%m%d-%H%M%S")}.zip'
+        path, _ = QFileDialog.getSaveFileName(self, '导出诊断包', default, '诊断包 (*.zip)')
+        if not path:
+            return
+        try:
+            from brb02.diagnostics import export_diagnostics
+            out = export_diagnostics(self.ctx['cfg'], self.ctx['worker'],
+                                     LOGBUF.text(), path)
+            LOGBUF.write(f'[诊断] 已导出: {out}')
+        except Exception as e:
+            LOGBUF.write(f'[诊断] 导出失败: {e!r}')
+
     def _clear_log(self):
         from brb02.logbuf import LOGBUF as _LB
         _LB.clear()
+
+
+# ================= 屏幕图片页 =================
+# 设备方向标定 (2026-10-04 设备侧 v3.13 看屏定案: 恒等, 无翻转)。
+# 同时作用于 **预览** 与 **上传画布**: 预览 = 设备实际显示效果; 上传按同向翻转 → 所见即所得。
+FLIP_H = False      # 水平翻转 (左右镜像)
+FLIP_V = False      # 垂直翻转 (上下镜像)
+SCREEN_W, SCREEN_H = 428, 142          # 设备画布 (与 screen_upload.CANVAS_W/H 一致)
+IMG_FILTER = '图片 (*.png *.jpg *.jpeg *.bmp *.webp)'
+
+_FIT_STRETCH = '拉伸铺满 (不裁边; 比例不符会轻微形变)'
+_FIT_COVER = '等比裁边 (不形变; 居中裁掉超出部分)'
+
+
+def fit_image(img: QImage, fit: str) -> QImage:
+    """把任意图变成 428×142 画布预览 (与上传画布同一规则)。
+
+    stretch = 拉伸铺满; cover = 等比放大到覆盖画布后居中裁边。
+    """
+    if img.isNull():
+        return img
+    if fit == 'cover':
+        s = img.scaled(SCREEN_W, SCREEN_H, Qt.KeepAspectRatioByExpanding,
+                       Qt.SmoothTransformation)
+        x = max(0, (s.width() - SCREEN_W) // 2)
+        y = max(0, (s.height() - SCREEN_H) // 2)
+        return s.copy(x, y, SCREEN_W, SCREEN_H)
+    return img.scaled(SCREEN_W, SCREEN_H, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+
+
+class ScreenPage(QWidget):
+    """屏幕图片页: 选图/拖入 (PNG/JPG) → 预览 (428:142) → 上传到散热器屏幕。"""
+
+    def __init__(self, ctx, parent=None):
+        super().__init__(parent)
+        self.ctx = ctx
+        self.cfg = ctx['cfg']
+        self._path = None
+        self._busy = False
+        self.setAcceptDrops(True)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(6, 4, 6, 6)
+        v.setSpacing(16)
+
+        head = QLabel('屏幕图片')
+        head.setObjectName('PageTitle')
+        v.addWidget(head)
+
+        card, _, cv = _card(
+            '上传图片',
+            '选择或拖入 PNG / JPG → 预览 (428:142) → 上传到散热器屏幕。'
+            '整程约 16 秒, 期间风扇控制暂停, 请勿拔线或操作设备。\n'
+            '默认屏幕显示信息卡 (CPU/GPU 型号 + 日期, 连接时自动更新); '
+            '手动上传后屏幕保持你的图片, 可随时点「恢复信息卡」切回。'
+            '**图片上传仅支持 USB 连接** (蓝牙通道被硬性禁用)。')
+
+        self.preview = QLabel('将图片拖到这里, 或点击"选择图片"')
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setFixedSize(SCREEN_W, SCREEN_H)
+        self.preview.setStyleSheet(
+            'background: rgba(127,127,127,0.10); border: 1px dashed rgba(127,127,127,0.45);'
+            ' border-radius: 12px; color: #98a2b3;')
+        cv.addWidget(self.preview, 0, Qt.AlignHCenter)
+
+        fit_row = QHBoxLayout()
+        fit_row.setSpacing(10)
+        fit_row.addWidget(QLabel('缩放方式'))
+        self.fit_combo = QComboBox()
+        self.fit_combo.addItem(_FIT_STRETCH, 'stretch')
+        self.fit_combo.addItem(_FIT_COVER, 'cover')
+        self.fit_combo.setMinimumWidth(330)
+        self.fit_combo.setToolTip('图片比例与屏幕 (428:142) 不符时的处理方式')
+        self.fit_combo.setCurrentIndex(max(0, self.fit_combo.findData(
+            getattr(self.cfg, 'image_fit', 'stretch'))))
+        self.fit_combo.currentIndexChanged.connect(self._on_fit_changed)
+        fit_row.addWidget(self.fit_combo)
+        fit_row.addStretch(1)
+        cv.addLayout(fit_row)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.btn_pick = QPushButton('选择图片')
+        self.btn_pick.clicked.connect(self._pick)
+        self.btn_up = QPushButton('上传到屏幕')
+        self.btn_up.clicked.connect(self._upload)
+        self.btn_up.setEnabled(False)
+        self.btn_cancel = QPushButton('取消')
+        self.btn_cancel.clicked.connect(self._cancel)
+        self.btn_cancel.setEnabled(False)
+        self.btn_card = QPushButton('恢复信息卡')
+        self.btn_card.clicked.connect(self._restore_card)
+        self.btn_card.setToolTip('切回默认信息卡 (CPU/GPU 型号 + 日期), 已连接时立即上屏')
+        row.addWidget(self.btn_pick)
+        row.addWidget(self.btn_up)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_card)
+        row.addStretch(1)
+        cv.addLayout(row)
+
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 2096)
+        self.bar.setValue(0)
+        self.bar.setFormat('%v / %m 帧')
+        cv.addWidget(self.bar)
+
+        self.result = QLabel('')
+        self.result.setObjectName('CardHint')
+        self.result.setWordWrap(True)
+        cv.addWidget(self.result)
+        v.addWidget(card)
+        v.addStretch(1)
+
+        w = ctx['worker']
+        w.uploadProgress.connect(self._on_progress)
+        w.uploadFinished.connect(self._on_finished)
+        w.connectionChanged.connect(self._on_conn_changed)
+        self._sync_buttons()
+
+        last = getattr(self.cfg, 'last_image_path', '') or ''
+        if last and os.path.isfile(last):
+            self._set_path(last, remember=False)     # 恢复上次选图
+
+    # ---- 选择 / 拖入 ----
+    @property
+    def _fit(self) -> str:
+        return self.fit_combo.currentData() or 'stretch'
+
+    def _set_path(self, path: str, remember: bool = True):
+        self._path = path
+        self._render_preview()
+        self.bar.setValue(0)
+        self.result.setText('')
+        if remember:
+            try:
+                self.cfg.last_image_path = path
+                self.cfg.save()
+            except Exception:
+                pass
+        self._sync_buttons()
+
+    def _pick(self):
+        from PySide6.QtWidgets import QFileDialog
+        start = os.path.dirname(self._path) if self._path else ''
+        path, _ = QFileDialog.getOpenFileName(self, '选择图片', start, IMG_FILTER)
+        if path:
+            self._set_path(path)
+
+    def dragEnterEvent(self, ev):
+        if ev.mimeData().hasUrls() and any(u.isLocalFile() for u in ev.mimeData().urls()):
+            ev.acceptProposedAction()
+        else:
+            ev.ignore()
+
+    def dropEvent(self, ev):
+        for u in ev.mimeData().urls():
+            if u.isLocalFile():
+                self._set_path(u.toLocalFile())
+                ev.acceptProposedAction()
+                return
+
+    # ---- 预览 ----
+    def _render_preview(self):
+        img = QImage(self._path) if self._path else QImage()
+        if img.isNull():
+            self.preview.setPixmap(QPixmap())
+            self.preview.setText('无法解码该图片 (请用 PNG/JPG)')
+            return
+        img = fit_image(img, self._fit)
+        if FLIP_H or FLIP_V:
+            img = img.mirrored(FLIP_H, FLIP_V)
+        self.preview.setText('')
+        self.preview.setPixmap(QPixmap.fromImage(img))
+
+    def _on_fit_changed(self, _idx):
+        try:
+            self.cfg.image_fit = self._fit
+            self.cfg.save()
+        except Exception:
+            pass
+        if self._path:
+            self._render_preview()
+
+    # ---- 上传 ----
+    def _sync_buttons(self):
+        """按钮态统一计算: 上传按钮要求 已连接 + USB 通道 + 已选图 + 非上传中。"""
+        w = self.ctx['worker']
+        usb_ok = bool(getattr(w.device, 'connected', False)) \
+            and getattr(w.device, 'conn_type', 'usb') == 'usb'
+        self.btn_up.setEnabled(usb_ok and self._path is not None and not self._busy)
+        if not getattr(w.device, 'connected', False):
+            tip = '设备未连接'
+        elif not usb_ok:
+            tip = '图片上传仅支持 USB 连接 (蓝牙通道已禁用)'
+        else:
+            tip = ''
+        self.btn_up.setToolTip(tip)
+
+    def _on_conn_changed(self, ok, msg):
+        self._sync_buttons()
+
+    def _upload(self):
+        if not self._path or self._busy:
+            return
+        w = self.ctx['worker']
+        if not w.device.connected:
+            self.result.setText('设备未连接 —— 请先在设备页连接散热器。')
+            return
+        if w.device.conn_type != 'usb':
+            # 硬性禁止 (v3.28): 蓝牙图传实测 ~100s/张 且未经验证, 防误点出残图
+            self.result.setText('图片上传仅支持 USB 连接 —— 蓝牙通道已禁用。请插上 USB 线后重试。')
+            return
+        self._busy = True
+        self.btn_pick.setEnabled(False)
+        self.btn_up.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+        self.bar.setValue(0)
+        self.result.setText('上传中... (约 16 秒, 请勿操作设备)')
+        w.start_image_upload(self._path, flip_h=FLIP_H, flip_v=FLIP_V, fit=self._fit)
+
+    def _cancel(self):
+        self.ctx['worker'].cancel_image_upload()
+        self.btn_cancel.setEnabled(False)
+        self.result.setText('正在取消...')
+
+    def _restore_card(self):
+        """切回默认信息卡: 已连接 (USB) 时立即上屏, 否则保存偏好待连接后生效。"""
+        w = self.ctx['worker']
+        w.restore_info_card()
+        if w.uploading:
+            self.result.setText('设备正在上传, 完成后自动上信息卡。')
+        elif not w.device.connected:
+            self.result.setText('已切回信息卡模式 —— 连接散热器后自动上屏。')
+        elif w.device.conn_type == 'ble':
+            self.result.setText('已切回信息卡模式 —— 蓝牙通道无法上传, 请改用 USB。')
+        else:
+            self.result.setText('信息卡上屏中... (约 11 秒)')
+
+    # ---- worker 回调 ----
+    def _on_progress(self, done, total):
+        self.bar.setMaximum(total)
+        self.bar.setValue(done)
+
+    def _on_finished(self, res: dict):
+        self._busy = False
+        self.btn_pick.setEnabled(True)
+        self._sync_buttons()
+        self.btn_cancel.setEnabled(False)
+        if res.get('ok'):
+            self.bar.setValue(self.bar.maximum())
+        hist = res.get('status_hist') or {}
+        hist_txt = ', '.join(f'{k:#04x}×{v}' for k, v in sorted(hist.items())) or '无'
+        lines = [f'结果: {res.get("reason", "")}',
+                 f'C6 应答 {res.get("c6_total", 0)} 条 · 状态 {{{hist_txt}}}',
+                 f'C4 ACK {res.get("c4_ack_ms", 0.0):.0f}ms · '
+                 f'耗时 {res.get("elapsed_ms", 0.0) / 1000:.1f}s']
+        fb = res.get('first_bad')
+        if fb:
+            lines.append(f'首个非 00: C6#{fb[0]} = {fb[1]:#04x}')
+        self.result.setText('\n'.join(lines))

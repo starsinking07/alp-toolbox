@@ -130,6 +130,14 @@ class TransportBLE:
     def serial(self) -> str:
         return self.address or ''
 
+    # ---- 上传等时序敏感路径专用 (与 USB 传输层同接口) ----
+    def write_exact(self, data: bytes) -> int:
+        """BLE 帧本就不补零, 与 write 等价。"""
+        return self.write(data)
+
+    def read_exact(self, timeout_ms: int = 20, size: int = 64) -> bytes:
+        return self.read(timeout_ms)
+
     # ---- 关闭 ----
     def close(self):
         if self._closed:

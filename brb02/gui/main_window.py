@@ -13,13 +13,15 @@ from brb02.hotkeys import HK_CYCLE_GEAR, HK_TOGGLE_SMART, HotkeyManager
 
 from .theme import build_qss, temp_color
 from .widgets import Badge, FanIcon, nav_icon, style_combo_popup
-from .pages import AboutPage, ControlPage, CurvePage, DevicePage, StatusPage, MAX_RPM
+from .pages import (AboutPage, ControlPage, CurvePage, DevicePage, ScreenPage,
+                    StatusPage, MAX_RPM)
 
 APP_NAME = 'Alp 工具箱'
 DOCK_COLLAPSED = 76
 DOCK_EXPANDED = 200
 
 NAV = [('状态', 'status', 'status'), ('曲线', 'curve', 'curve'),
+       ('屏幕', 'screen', 'screen'),
        ('设置', 'control', 'control'), ('设备', 'devices', 'devices')]
 ABOUT_KEY = 'about'
 
@@ -69,7 +71,8 @@ class TitleBar(QWidget):
         self.win.showNormal() if self.win.isMaximized() else self.win.showMaximized()
 
     def _close(self):
-        QApplication.quit()
+        # ✕ = 隐藏到托盘 (后台温控不停); 真退出走托盘菜单「退出」
+        self.win.hide_to_tray()
 
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton:
@@ -102,9 +105,9 @@ class Sidebar(QWidget):
     """悬浮圆角面板: 图标导航, 激活项药丸高亮。"""
 
     ICON_KIND = {'status': 'status', 'curve': 'curve', 'control': 'control',
-                 'devices': 'devices', ABOUT_KEY: 'about'}
+                 'screen': 'screen', 'devices': 'devices', ABOUT_KEY: 'about'}
     LABEL = {'status': '状态', 'curve': '曲线', 'control': '设置',
-             'devices': '设备', ABOUT_KEY: '关于'}
+             'screen': '屏幕', 'devices': '设备', ABOUT_KEY: '关于'}
 
     def __init__(self, win: 'MainWindow'):
         super().__init__(win)
@@ -225,6 +228,7 @@ class MainWindow(QMainWindow):
         self.pages = {
             'status': StatusPage(self.ctx),
             'curve': CurvePage(self.ctx),
+            'screen': ScreenPage(self.ctx),
             'control': ControlPage(self.ctx),
             'devices': DevicePage(self.ctx),
             ABOUT_KEY: AboutPage(self.ctx),
@@ -263,7 +267,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
 
         a_quit = QAction('退出 Alp 工具箱', self)
-        a_quit.triggered.connect(QApplication.quit)
+        a_quit.triggered.connect(self.real_quit)
         menu.addAction(a_quit)
 
         self.tray.setContextMenu(menu)
@@ -275,6 +279,9 @@ class MainWindow(QMainWindow):
         self._tray_timer = QTimer(self)
         self._tray_timer.timeout.connect(self._update_tray_info)
         self._tray_timer.start(1000)
+        # 关闭行为 (v3.24): ✕/Alt+F4 = 隐藏到托盘; 真退出只走托盘菜单
+        self._really_quit = False
+        self._tray_hint_shown = False
 
         # 快捷键
         self.hotkeys = None
@@ -285,6 +292,7 @@ class MainWindow(QMainWindow):
         worker.statusChanged.connect(self._on_status)
         worker.tempsChanged.connect(self._on_temps)
         worker.connectionChanged.connect(self._on_conn)
+        worker.deviceGearChanged.connect(self._on_device_gear)
         worker.infoChanged.connect(self._on_info)
 
         self.apply_theme(cfg.dark)
@@ -360,6 +368,25 @@ class MainWindow(QMainWindow):
     # ---- 托盘 ----
     def _show(self):
         self.show()
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.raise_()
+        self.activateWindow()
+
+    def hide_to_tray(self):
+        """✕ / Alt+F4: 隐藏到托盘, 后台温控不停 (真退出走托盘菜单)。首次给气泡提示。"""
+        self.hide()
+        if not self._tray_hint_shown:
+            self._tray_hint_shown = True
+            self.tray.showMessage('Alp 工具箱仍在运行',
+                                  '散热器控制持续后台运行。点托盘图标打开窗口, '
+                                  '退出请右键托盘菜单选「退出」。',
+                                  QSystemTrayIcon.Information, 3000)
+
+    def real_quit(self):
+        """托盘「退出」: 优雅真退出 (走 closeEvent 停 worker/热键, 不留后台)。"""
+        self._really_quit = True
+        self.close()
+        QApplication.quit()
         self.raise_()
         self.activateWindow()
 
@@ -441,6 +468,12 @@ class MainWindow(QMainWindow):
         self.pages['status'].on_temps(cpu, gpu)
         self.pages['control'].on_temps(cpu, gpu)
 
+    def _on_device_gear(self, level: int, rpm: int):
+        """散热器实体按钮换档 → 工具箱同步 (0x25 轮询检测)。"""
+        self.statusBar().showMessage(
+            f'散热器按钮换档: FAN L{level} · {rpm} RPM — 已同步到工具箱', 5000)
+        self.tray.setToolTip(f'{APP_NAME} — L{level} · {rpm} RPM')
+
     def _on_conn(self, ok, msg):
         import time as _t
         self.is_connected = ok
@@ -463,6 +496,10 @@ class MainWindow(QMainWindow):
         self.pages['control'].on_info(info)
 
     def closeEvent(self, e):
+        if not self._really_quit and e.spontaneous():
+            e.ignore()                      # ✕ / Alt+F4: 隐藏到托盘, 不退出
+            self.hide_to_tray()
+            return
         self.worker.stop()
         self.worker.wait(2000)
         if self.hotkeys:

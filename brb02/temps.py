@@ -43,6 +43,7 @@ class TempReader:
         self.interval = interval
         self.cpu: float = 0.0
         self.gpu: float = 0.0
+        self.gpu_hotspot: float | None = None   # NVIDIA 热点温度 (屏幕 ID06 疑似来源)
         self.cpu_name: str = ''
         self.gpu_name: str = ''
         self.cpu_power: float | None = None    # W
@@ -92,9 +93,10 @@ class TempReader:
         while not self._stop.is_set():
             cpu = 0.0
             gpu = 0.0
+            gpu_hs = None
             cpu_p = None
             gpu_p = None
-            gpus = []          # [(name, temp, power)]
+            gpus = []          # [(name, temp, hotspot, power)]
             cpu_name = ''
             gpu_name = ''
             try:
@@ -108,8 +110,8 @@ class TempReader:
                             cpu_name = hw_name
                         self._scan_cpu(hw, cpu_hits)
                     if 'Gpu' in ht:
-                        g_temp, g_power = self._scan_gpu(hw)
-                        gpus.append((hw_name, g_temp, g_power))
+                        g_temp, g_hs, g_power = self._scan_gpu(hw)
+                        gpus.append((hw_name, g_temp, g_hs, g_power))
                 # CPU
                 if cpu_hits:
                     cpu = max(cpu_hits)
@@ -126,7 +128,8 @@ class TempReader:
                     sel = gpus[0]
                     gpu = sel[1] or 0.0
                     gpu_name = sel[0]
-                    gpu_p = sel[2]
+                    gpu_hs = sel[2]
+                    gpu_p = sel[3]
                 else:
                     gpu_name = ''
                 # CPU 功耗单独扫
@@ -136,6 +139,7 @@ class TempReader:
                 traceback.print_exc()
             with self._lock:
                 self.cpu, self.gpu = cpu, gpu
+                self.gpu_hotspot = gpu_hs
                 self.cpu_ok = cpu > 0
                 if cpu_name:
                     self.cpu_name = cpu_name
@@ -162,9 +166,10 @@ class TempReader:
                 pass
             self._scan_cpu(sub, cpu_out)
 
-    def _scan_gpu(self, hw) -> tuple[float | None, float | None]:
-        """返回 (温度, 功耗W)"""
+    def _scan_gpu(self, hw) -> tuple[float | None, float | None, float | None]:
+        """返回 (温度, 热点温度, 功耗W)"""
         temp = None
+        hotspot = None
         power = None
         DBG = os.environ.get('BRB02_GPU_DEBUG')
         for s in hw.Sensors:
@@ -173,6 +178,8 @@ class TempReader:
                 n = str(s.Name)
                 if 'GPU Core' in n or 'GPU Temperature' in n:
                     temp = float(s.Value)
+                if 'Hot Spot' in n:
+                    hotspot = float(s.Value)
             if st == 'Power':
                 n = str(s.Name).lower()
                 if DBG:
@@ -190,12 +197,14 @@ class TempReader:
                 sub.Update()
             except Exception:
                 pass
-            t2, p2 = self._scan_gpu(sub)
+            t2, h2, p2 = self._scan_gpu(sub)
             if temp is None:
                 temp = t2
+            if hotspot is None:
+                hotspot = h2
             if power is None:
                 power = p2
-        return temp, power
+        return temp, hotspot, power
 
     def _scan_cpu_power(self, computer) -> float | None:
         for hw in computer.Hardware:

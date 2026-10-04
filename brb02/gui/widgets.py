@@ -116,6 +116,18 @@ def draw_icon_pixmap(kind: str, size: int, color: str) -> QPixmap:
         p.drawEllipse(QPointF(0, 0), 9 * u, 9 * u)
         p.drawLine(QPointF(0, -1 * u), QPointF(0, 4 * u))
         p.drawPoint(QPointF(0, -4.5 * u))
+    elif k == 'screen':                    # monitor + picture
+        p.drawRoundedRect(QRectF(-9 * u, -7.5 * u, 18 * u, 13 * u), 1.4 * u, 1.4 * u)
+        p.drawLine(QPointF(-3 * u, 5.5 * u), QPointF(3 * u, 5.5 * u))
+        p.drawLine(QPointF(0, 5.5 * u), QPointF(0, 8.5 * u))
+        p.drawEllipse(QPointF(-3.5 * u, -3 * u), 1.1 * u, 1.1 * u)
+        mpath = QPainterPath(QPointF(-6.5 * u, 4.5 * u))
+        mpath.lineTo(QPointF(-1.5 * u, -1 * u))
+        mpath.lineTo(QPointF(2.5 * u, 2.5 * u))
+        mpath.lineTo(QPointF(6.5 * u, -2 * u))
+        mpath.lineTo(QPointF(6.5 * u, 4.5 * u))
+        mpath.closeSubpath()
+        p.drawPath(mpath)
     p.end()
     return pm
 

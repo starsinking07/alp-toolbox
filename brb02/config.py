@@ -38,6 +38,10 @@ class Config:
     # 温度平滑: 采样数(EMA); 尖峰过滤
     temp_smoothing: int = 3             # 1=即时 2/3/5/10=EMA 强度
     spike_filter: bool = True
+    # TEC 自动档位
+    tec_auto_enabled: bool = False      # 半导体制冷随温度自动升/降档
+    tec_thresholds: list = field(default_factory=lambda: [55, 65, 75])   # L2/L3/L4 进入温度°C
+    tec_hysteresis: float = 2.0         # 降档回落滞回 °C
     # 智能启停
     start_stop_enabled: bool = False
     start_stop_off_below: float = 45.0  # 低于此温度关风扇
@@ -57,6 +61,13 @@ class Config:
     scene_rules: list = field(default_factory=list)
     # 快捷键
     hotkeys_enabled: bool = True
+    # 屏幕图片页
+    last_image_path: str = ''           # 记住上次选择的图片
+    image_fit: str = 'stretch'          # 'stretch'=拉伸铺满 | 'cover'=等比放大后居中裁边
+    # 散热器屏幕内容 (v3.21: 信息卡默认, 自定义图片是用户的选择)
+    screen_mode: str = 'card'           # 'card'=信息卡(默认) | 'custom'=自定义图片
+    screen_cards: bool = False          # 情境卡片 (v3.32): 默认关, 有需要的人在设置里开
+    screen_card_auto: bool = True       # 信息卡自动上屏 (连接恢复 + 日期轮转)
     # 挡位预设
     presets: dict = field(default_factory=lambda: dict(DEFAULT_PRESETS))
     autostart_minimized: bool = False

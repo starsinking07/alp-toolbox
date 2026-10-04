@@ -84,6 +84,14 @@ class TransportUSB:
         except Exception:
             return ''
 
+    @property
+    def is_connected(self) -> bool:
+        """存活判定 = 设备仍在总线上 (拔线/休眠后为 False, 供上层重连判定)。"""
+        try:
+            return find_device() is not None
+        except Exception:
+            return False
+
     def write(self, data: bytes) -> int:
         """发送任意长度 payload, 自动补零到 65 字节"""
         pkt = data.ljust(PKT_SIZE, b'\x00')[:PKT_SIZE]
@@ -111,6 +119,17 @@ class TransportUSB:
             except usb.USBError:
                 break
         return out
+
+    # ---- 上传等时序敏感路径专用: 原样收发, 不补零、不加锁 ----
+    # (上传需 ~7ms/帧的精确节拍; 走 _lock 会被对端 read 的超时窗口卡住。调用方须保证
+    #  设备独占 —— service 上传期间已暂停轮询/下发。)
+    def write_exact(self, data: bytes) -> int:
+        """原样发送 len(data) 字节 (不补零到 65, 不加锁)。"""
+        return self.dev.write(EP_OUT, bytes(data), TIMEOUT_MS)
+
+    def read_exact(self, timeout_ms: int = 20, size: int = 64) -> bytes:
+        """读一个原始中断包 (不加锁)。超时抛 usb.USBError。"""
+        return bytes(self.dev.read(EP_IN, size, timeout_ms))
 
     def request(self, data: bytes, wait_ms=200):
         """发送并收集应答 (简化交互: 写后读空)"""
