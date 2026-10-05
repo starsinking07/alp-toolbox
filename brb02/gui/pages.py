@@ -1330,6 +1330,11 @@ class ControlPage(QWidget):
         self.tgl_autostart = Toggle(self._get_autostart())
         self.tgl_autostart.toggled = self._autostart_toggled
         cv3.addWidget(_setting_row('开机自启动', '任务计划最高权限开机静默启动 (免 UAC 弹窗, CPU 温度可用)', '🚀', self.tgl_autostart))
+        self.tgl_autostart_min = Toggle(getattr(cfg, 'autostart_minimized', False))
+        self.tgl_autostart_min.toggled = self._autostart_min_toggled
+        self.row_autostart_min = _setting_row('启动后最小化到托盘', '开机自启动时不弹主窗口, 静默驻留后台温控', '🛸', self.tgl_autostart_min)
+        cv3.addWidget(self.row_autostart_min)
+        _dim_widget(self.row_autostart_min, not self._get_autostart(), '先开启「开机自启动」')
         sv.addWidget(card3)
         sv.addStretch(1)
 
@@ -1598,8 +1603,9 @@ class ControlPage(QWidget):
         try:
             if on:
                 exe = self._autostart_exe()
+                flag = ' --tray' if getattr(self.ctx['cfg'], 'autostart_minimized', False) else ''
                 cmd = (f'schtasks /Create /F /TN "{self._AUTOSTART_TASK}" '
-                       f'/SC ONLOGON /RL HIGHEST /TR "\\"{exe}\\""')
+                       f'/SC ONLOGON /RL HIGHEST /TR "\\"{exe}{flag}\\""')
             else:
                 cmd = f'schtasks /Delete /F /TN "{self._AUTOSTART_TASK}"'
             r = subprocess.run(cmd, capture_output=True, creationflags=0x08000000)
@@ -1607,14 +1613,29 @@ class ControlPage(QWidget):
                 if on:
                     self._autostart_legacy_run_clear()
                 LOGBUF.write(f'[自启动] {"已开启 (任务计划: 登录时管理员身份静默运行)" if on else "已关闭"}')
+                self._sync_autostart_min_dim()
                 return
             err = (r.stderr or r.stdout or b'').decode('gbk', 'replace').strip() \
                 or f'exit={r.returncode}'
             LOGBUF.write(f'[自启动] {"开启" if on else "关闭"}失败: {err}')
             self.tgl_autostart.setChecked(self._get_autostart())   # 回滚开关视觉
+            self._sync_autostart_min_dim()
         except Exception as e:
             LOGBUF.write(f'[自启动] 操作异常: {e!r}')
             self.tgl_autostart.setChecked(self._get_autostart())
+            self._sync_autostart_min_dim()
+
+    def _autostart_min_toggled(self, on):
+        """「启动后最小化到托盘」: 仅当任务已注册时同步重注册任务命令 (加/去 --tray)。"""
+        cfg = self.ctx['cfg']
+        cfg.autostart_minimized = on
+        cfg.save()
+        if self._get_autostart():
+            self._autostart_toggled(True)   # 任务在: 重注册以带上/去掉 --tray
+
+    def _sync_autostart_min_dim(self):
+        """最小化开关的可用性跟随任务计划实际状态。"""
+        _dim_widget(self.row_autostart_min, not self._get_autostart(), '先开启「开机自启动」')
 
 
 # ================= 设备页 =================

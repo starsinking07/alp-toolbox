@@ -118,7 +118,10 @@ def _run(page):
     if page:
         win.switch_page(page)
     worker.start()
-    win.show()
+    if '--tray' in sys.argv:
+        win.hide_to_tray()   # 开机自启动静默驻留: 不弹主窗口 (托盘气泡提示一次)
+    else:
+        win.show()
 
     def _wake_second():
         """第二实例接入 → 唤醒主窗口。"""

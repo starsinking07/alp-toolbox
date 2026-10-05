@@ -116,6 +116,7 @@ class Config:
 
         self.fixed_rpm = _clamp(self.fixed_rpm, 0, 4800, 1200)
         self.pre_curve_rpm = _clamp(self.pre_curve_rpm, 0, 4800, 0)
+        self.autostart_minimized = bool(self.autostart_minimized)
 
         def _san_curve(c):
             pts = []
