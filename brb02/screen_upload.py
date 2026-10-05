@@ -54,7 +54,7 @@
 
 用法:
     from brb02.screen_upload import image_to_rgb565_be, build_upload
-    data = image_to_rgb565_be(r'D:\\pic.png')      # 121,552B (428×142 RGB565BE)
+    data = image_to_rgb565_be(r'<图片路径>.png')   # 121,552B (428×142 RGB565BE)
     frames = build_upload(data)                    # list[UploadFrame], 带 at_ms 时刻表
 """
 from __future__ import annotations
