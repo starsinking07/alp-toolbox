@@ -543,7 +543,7 @@ class MainWindow(QMainWindow):
             pass
         self.tray.setToolTip(f'{APP_NAME} — L{level} · {rpm} RPM')
         try:
-            self.pages['curve'].sync_from_device(rpm)    # 挡位卡/滑条回填 (双向同步)
+            self.pages['curve'].sync_from_device(level, rpm)   # 挡位卡/滑条回填 (双向同步)
         except Exception:
             pass
         try:
