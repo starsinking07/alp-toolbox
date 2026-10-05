@@ -743,6 +743,11 @@ class DeviceWorker(QThread):
         # 设备按钮换档 → 采纳为手动设定 (防止控制循环 5s 后覆盖用户的按钮选择)
         self._last_sent_rpm = int(rpm)
         self._manual_until = now + 15
+        if self.config.curve_enabled:
+            # 物理按钮 = 用户要手动控速: 退出智能变频 (否则曲线在保持窗结束后会
+            # 覆盖按钮选择, 用户实测 LV2 被弹回 LV1, v3.65)
+            self.config.curve_enabled = False
+            self.config.save()
         self.deviceGearChanged.emit(int(lvl), int(rpm))
         from .logbuf import LOGBUF
         LOGBUF.write(f'[档位] 设备按钮换档: L{lvl} · {rpm} RPM (已同步工具箱)')
@@ -985,8 +990,11 @@ class DeviceWorker(QThread):
         GUI 手动操作保持原报错路径。未连接时引擎连上后也会自行恢复固定转速。"""
         if self._uploading:      # 上传期间设备独占, 忽略一切下发 (结束后引擎自会恢复)
             return
+        # 档位与引擎平滑映射一致 (2400/3000/3800): 滑条/挡位卡才能逐级到达 L1-L4
+        # (此前 level=None 走设备层二值映射 >2800→L4, L2/L3 永远发不出来, v3.65)
+        level = 4 if rpm >= 3800 else 3 if rpm >= 3000 else 2 if rpm >= 2400 else 1
         try:
-            self.device.set_fixed_rpm(rpm)
+            self.device.set_fixed_rpm(rpm, level=level)
         except Exception as e:
             if quiet:
                 return

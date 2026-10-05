@@ -534,6 +534,8 @@ class MainWindow(QMainWindow):
 
     def _on_device_gear(self, level: int, rpm: int):
         """散热器按钮换档同步 / 退出智能变频档位恢复 (worker 发起)。"""
+        # 物理按钮换档 → 切回手动模式 (智能变频若开着会被曲线覆盖, 五处 UI 同步)
+        self.sync_curve_toggle(False)
         # 无边框窗口没有状态栏: 换档事件走日志 + 托盘气泡 (防御式, 托盘可能不可用)
         LOGBUF.write(f'[换档] 已同步: FAN L{level} · {rpm} RPM')
         try:
