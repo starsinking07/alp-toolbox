@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 构建产物
+build/
+dist/
+
+# 本机运行日志与抓包 (含设备地址/本机路径, 不公开)
+*.log
+err*.log
+*.pcap
+capture*.jsonl
+ui_*.png
+hold_rpm.txt
+hold_level.txt
+cap_log.txt
+usbpcap_tree.txt
+insns_cache.pkl
+exe_insns.pkl
+
+# 逆向工作目录 (含本机绝对路径, 不公开)
+tools/
+
+# 内部文档
+HANDOFF.md
+BRB02_protocol_for_FanControl.md

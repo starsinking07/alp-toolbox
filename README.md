@@ -1,0 +1,103 @@
+# Alp 工具箱
+
+黑鲨风神 Pro(BRB02)压风式散热器(纯风冷,无制冷片)的**第三方开源控制工具**,替代官方"黑鲨装备箱"。
+
+Python + PySide6,支持 **USB / 蓝牙 BLE 双通道**(自动切换),通信协议全部实机逆向验证。
+界面设计语言复刻 [FanControlPortable](https://github.com/Doongjohn/FanControlPortable)(MIT)。
+
+**作者:苏晓沉(StarSinking)**
+
+## 关于开发方式
+
+本项目由作者与 AI 结对完成:作者负责需求定义、硬件实验(抓包/真机验证/功耗实测)与产品
+决策,AI 负责代码实现与文档整理——这一点不藏着。协议逆向的全部结论都有 USBPcap 抓包
+与真机实测背书(见 [PROTOCOL.md](PROTOCOL.md)),完整开发时间线见
+[开发历程 DEVLOG](docs/DEVLOG.md)。源码仓库起步较晚(此前在本地开发),自 v0.1.7 起
+采用常规 git 流程与 Conventional Commits 提交规范。
+
+## 界面预览
+
+| 浅色主题 | 深色主题 |
+|---|---|
+| ![浅色主题](docs/screenshot-light.png) | ![深色主题](docs/screenshot-dark.png) |
+
+## 功能
+
+- **双通道连接**:USB(libusb 中断传输)/ 蓝牙 BLE,拔线自动切蓝牙、插线自动切回
+- **状态页**:CPU/GPU 半圆仪表、实时转速、温度/功耗统计
+- **智能变频**:19 锚点可视化曲线编辑器,PC 端按温度实时下发转速
+- **4 挡位 + 12 点滑条**手动控制,挡位灯联动(切挡自动换灯色)
+- **智能启停** / **自适应学习** / **温升预判**
+- **灯效面板**:彩色流动 / 彩色循环 / 呼吸 / 常亮 / 闪烁 / 响应 / 刷新,
+  单色/彩色、色调、亮度、速度,与官方装备箱同款参数
+- **灯光开关**、灯效配置设备侧持久化
+- **屏幕图片上传**:选图 / 拖入任意 PNG·JPG → 预览(428×142) → 一键上传到散热器屏幕
+  (USB 通道;拉伸铺满 / 等比裁边二选一;整程约 16 秒)
+- **屏幕信息卡(默认开启)**:连接后自动上屏 CPU/GPU 型号 + 当日日期,每天自动更新,
+  「恢复信息卡」随时切回;**情境卡片(可选)**:全屏游戏自动切游戏卡(前台进程名),
+  CPU/GPU ≥85°C 自动推红色警报卡
+- **档位双向同步**:散热器实体按钮换档 → 工具箱实时同步(不再被覆盖);
+  手动转速渐进映射官方四档(低噪 → 平衡 → 强效 → 超频)
+- **托盘常驻**:点 ✕ 最小化到托盘,后台温控不停;重复启动自动唤醒已开窗口
+- 温度 EMA 平滑 + 尖峰过滤、温度历史(30 分钟趋势)、托盘实时数据
+- 全局快捷键(Ctrl+Alt+F1 循环挡位 · Ctrl+Alt+F2 智能变频)、亮/暗主题
+
+## 下载 / 安装
+
+### 安装版(推荐)
+
+从 Release 页下载 `Alp工具箱-setup-vX.Y.Z.exe`,双击安装:
+
+- 安装器已集成 [PawnIO](https://github.com/hirschmann/pawnio) 驱动,装完 CPU 温度即可用
+- 内置「检查更新」,关于页可一键下载新版本安装包
+- 支持开机自启动
+
+### 免安装版
+
+从 Release 页下载 `Alp工具箱.exe`,双击运行(UAC 提权后可读取 CPU 温度)。
+
+### 源码运行
+
+```bash
+git clone <本仓库>
+cd alp-toolbox
+pip install PySide6 pyusb libusb-package pythonnet bleak
+python main.py
+```
+
+- 温度/功耗读取使用 `LHM/LibreHardwareMonitorLib.dll`(MPL-2.0,已随仓库附带),
+  程序会自动在打包资源、`LHM/` 目录下定位。
+- **CPU 温度**需要管理员权限 + [PawnIO](https://github.com/hirschmann/pawnio) 驱动;
+  无提权时自动降级显示 GPU 温度。
+- 打包:`pip install pyinstaller && pyinstaller --clean -y Alp.spec`
+
+## 硬件协议
+
+通信协议已完整逆向并整理成文档,**欢迎集成到其他项目**:
+
+- [PROTOCOL.md](PROTOCOL.md) — 完整通信协议(传输层 / 帧格式 / 命令总表 / 档位与曲线控制 / 心跳)
+- [LIGHTING.md](LIGHTING.md) — RGB 灯效协议独立文档(8 种模式 / 参数字段 / 官方实帧 / 参考实现)
+
+> ⚠️ **危险警告**:向设备发送 LEN 与实际不符、或含非法曲线锚点的帧,会被固件写入
+> flash 导致开机循环崩溃。请勿在未确认字段含义时发送写命令。
+
+## 系统要求
+
+- Windows 10 / 11
+- 黑鲨风神 Pro(BRB02)散热器(USB 连接,或长按按键 3–5 秒进入蓝牙配对)
+- CPU 温度显示:管理员权限 + PawnIO 驱动(可选)
+
+## 免责声明
+
+本项目为非官方工具,与黑鲨 / 小米无关。涉及固件通信,存在理论上的设备风险,
+请自行评估并谨慎使用。作者不对因使用本软件造成的任何损失负责。
+
+## 致谢
+
+- [FanControlPortable](https://github.com/Doongjohn/FanControlPortable)(MIT)— 界面设计语言与 Manrope 字体
+- [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)(MPL-2.0)— CPU/GPU 温度与功耗读取
+- 黑鲨官方"装备箱"— 协议逆向参考来源
+
+## License
+
+[MIT](LICENSE) © 2026 苏晓沉 (StarSinking)
