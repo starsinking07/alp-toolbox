@@ -741,13 +741,10 @@ class DeviceWorker(QThread):
         if now - self._last_host_0x24_ts < 6:
             return                               # 主机刚发过 0x24 → 主机自己的变更
         # 设备按钮换档 → 采纳为手动设定 (防止控制循环 5s 后覆盖用户的按钮选择)
+        # 注: 智能变频运行中, 曲线在保持窗结束后恢复是设计行为 (用户确认);
+        #     手动模式下则纯双向同步 —— 工具箱不再重发, 设备保持按钮所选档位。
         self._last_sent_rpm = int(rpm)
         self._manual_until = now + 15
-        if self.config.curve_enabled:
-            # 物理按钮 = 用户要手动控速: 退出智能变频 (否则曲线在保持窗结束后会
-            # 覆盖按钮选择, 用户实测 LV2 被弹回 LV1, v3.65)
-            self.config.curve_enabled = False
-            self.config.save()
         self.deviceGearChanged.emit(int(lvl), int(rpm))
         from .logbuf import LOGBUF
         LOGBUF.write(f'[档位] 设备按钮换档: L{lvl} · {rpm} RPM (已同步工具箱)')
