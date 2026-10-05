@@ -22,6 +22,36 @@ def temp_color(temp, dark=False) -> str:
 def _pen(color, w):
     pen = QPen(QColor(color), w)
     pen.setCapStyle(Qt.RoundCap)
+
+
+def _pen(color, w):
+    pen = QPen(QColor(color), w)
+    pen.setCapStyle(Qt.RoundCap)
+    return pen
+
+
+def draw_caption_glyph(kind: str, size: int, color, pen_w: float) -> QPixmap:
+    """窗口按钮字形 (矢量绘制, 线宽可控): min 横线 / max 方框 / close 叉。
+
+    替代文字字形 (—/□/✕): 文字笔画粗细由字体决定, 档位切换无效。"""
+    pm = QPixmap(size * 4, size * 4)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    s = size * 4
+    p.setPen(QPen(QColor(color), pen_w * 4, Qt.SolidLine, Qt.RoundCap))
+    p.setBrush(Qt.NoBrush)
+    m = s * 0.20                      # 内边距
+    if kind == 'min':
+        y = s * 0.58
+        p.drawLine(QPointF(m, y), QPointF(s - m, y))
+    elif kind == 'max':
+        p.drawRect(QRectF(m, m, s - 2 * m, s - 2 * m))
+    else:                              # close
+        p.drawLine(QPointF(m, m), QPointF(s - m, s - m))
+        p.drawLine(QPointF(s - m, m), QPointF(m, s - m))
+    p.end()
+    return pm
     pen.setJoinStyle(Qt.RoundJoin)
     return pen
 

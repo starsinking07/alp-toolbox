@@ -57,24 +57,33 @@ class TitleBar(QWidget):
         h.addStretch(1)
 
         self.win_btns = []
-        for text, obj, cb in (('—', 'WinBtn', self._min), ('□', 'WinBtn', self._max),
-                              ('✕', 'WinBtnClose', self._close)):
-            b = QPushButton(text)
+        for obj, kind, cb in (('WinBtn', 'min', self._min), ('WinBtn', 'max', self._max),
+                              ('WinBtnClose', 'close', self._close)):
+            b = QPushButton('')
             b.setObjectName(obj)
             b.setFixedSize(42, 32)
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(cb)
             h.addWidget(b)
-            self.win_btns.append(b)
-        self.set_btn_style(getattr(win.cfg, 'titlebar_btn', 'thin'))
+            self.win_btns.append((b, kind))
+        self._btn_mode = getattr(win.cfg, 'titlebar_btn', 'thin')
+        self._apply_win_btn_style()
 
     def set_btn_style(self, mode: str = 'thin'):
-        """窗口按钮字重档位 (用户设置): thin 纤细 (默认) / normal 加粗放大。"""
-        for b in self.win_btns:
-            if mode == 'normal':
-                b.setStyleSheet('font-size: 16px; font-weight: 700;')
-            else:
-                b.setStyleSheet('')   # 清除内联 → 回落全局 QSS 纤细样式
+        """窗口按钮字形档位 (用户设置): thin 纤细 (默认) / normal 加粗放大 (矢量绘制)。"""
+        self._btn_mode = mode if mode in ('thin', 'normal') else 'thin'
+        self._apply_win_btn_style()
+
+    def _apply_win_btn_style(self):
+        from .theme import DARK, LIGHT
+        from .widgets import draw_caption_glyph
+        t = DARK if self.win.cfg.dark else LIGHT
+        normal = self._btn_mode == 'normal'
+        size = 17 if normal else 13
+        pen_w = 2.6 if normal else 1.5
+        for b, kind in self.win_btns:
+            b.setIcon(QIcon(draw_caption_glyph(kind, size, t['muted_fg'], pen_w)))
+            b.setIconSize(QSize(size, size))
 
     def _min(self):
         self.win.showMinimized()
@@ -118,6 +127,7 @@ class TitleBar(QWidget):
             f'background: transparent; font-size: 13px; font-weight: 700;'
             f' color: {temp_color(t, dark)};')
         self.badge_rpm.set_state(f'{self.win.last_rpm} RPM', False, 'fan', dark)
+        self._apply_win_btn_style()   # 窗口按钮字形颜色随主题
 
 
 class Sidebar(QWidget):
