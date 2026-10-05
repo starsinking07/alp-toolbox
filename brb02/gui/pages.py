@@ -922,18 +922,6 @@ class CurvePage(QWidget):
         self.ctx['cfg'].save()
         self.slider12.set_level(gear * 3 + 2)        # 挡位卡 → 滑条同步 (预设满档点)
 
-    def sync_from_device(self, level: int, rpm: int = 0):
-        """物理按钮换档 → 挡位卡/滑条回填到对应档位 (双向同步, v3.66)。
-
-        按档位序号映射: 设备 LVn → 第 n 张挡位卡 (LV1 静音 / LV2 标准 /
-        LV3 强效 / LV4 超频) + 滑条该挡满档点。"""
-        try:
-            gear = max(0, min(3, int(level) - 1))
-            self.slider12.set_level(gear * 3 + 2)
-            self.gear_btns[gear].setChecked(True)
-        except Exception:
-            pass
-
     def _level_selected(self, k: int):
         gear, sub = k // 3, k % 3
         rpm = int(self._gear_rpm(gear) * GEAR_SUB[sub])

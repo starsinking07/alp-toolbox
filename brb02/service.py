@@ -717,7 +717,11 @@ class DeviceWorker(QThread):
         # 磨损预算时间戳改由 _run_screen_upload 成功后记账 (审计 G19)
 
     def _gear_sync_tick(self, now):
-        """0x25 轮询 (每 ~4s): 检测散热器实体按钮换档 → 采纳并通知 GUI (双向同步)。"""
+        """0x25 轮询 (每 ~4s): 检测散热器物理按钮换档 → 工具箱按当前模式立即接管。
+
+        v3.69 简化模型 (用户定案): 工具箱是唯一权威, 物理按钮的变更一律被当前模式
+        的输出覆盖回去 (智能变频=曲线目标, 手动=fixed_rpm) —— 不再做双向同步/
+        档位记忆/采纳持久化, 一劳永逸。"""
         if self._uploading or self._upload_req is not None or self._screen_queue:
             return
         if now - self._last_0x25_poll < 4.0:
@@ -732,31 +736,23 @@ class DeviceWorker(QThread):
         lvl, rpm = cur.get('on'), cur.get('rpm')
         if lvl is None or rpm is None:
             return
-        changed = (self._last_dev_level is not None
-                   and (lvl != self._last_dev_level
+        # 回读与工具箱意图一致 (= 刚下发的回声) → 不是按钮变更
+        same_as_sent = (self._last_sent_rpm is not None
+                        and abs((rpm or 0) - self._last_sent_rpm) <= 60)
+        changed = (not same_as_sent
+                   and (self._last_dev_level is None
+                        or lvl != self._last_dev_level
                         or abs((rpm or 0) - (self._last_dev_rpm or 0)) > 60))
         self._last_dev_level, self._last_dev_rpm = lvl, rpm
         if not changed:
             return
         if now - self._last_host_0x24_ts < 6:
-            # 主机刚发过 0x24 → 回读可能是主机自己的变更回声, 不弹通知;
-            # 但设备实际档位已变 → 对齐 cfg.fixed_rpm (重启还原不再覆盖按钮选择, v3.68)
-            if rpm and int(rpm) != self.config.fixed_rpm:
-                self.config.fixed_rpm = int(rpm)
-                self._last_sent_rpm = int(rpm)
-                self.config.save()
-            return
-        # 设备按钮换档 → 采纳为手动设定 (防止控制循环 5s 后覆盖用户的按钮选择)
-        # 注: 智能变频运行中, 曲线在保持窗结束后恢复是设计行为 (用户确认);
-        #     手动模式下则纯双向同步 —— 工具箱不再重发, 设备保持按钮所选档位。
-        self._last_sent_rpm = int(rpm)
-        self._manual_until = now + 15
-        if int(rpm) != self.config.fixed_rpm:
-            self.config.fixed_rpm = int(rpm)   # 持久化按钮档位 (重启还原不再覆盖, v3.68)
-            self.config.save()
-        self.deviceGearChanged.emit(int(lvl), int(rpm))
+            return                               # 主机刚发过 0x24 → 自己的回声
+        # 物理按钮换档 → 清空下发记忆, 引擎下一 tick 按当前模式立即接管
         from .logbuf import LOGBUF
-        LOGBUF.write(f'[档位] 设备按钮换档: L{lvl} · {rpm} RPM (已同步工具箱)')
+        self._last_sent_rpm = None
+        self._last_host_0x24_ts = 0
+        LOGBUF.write(f'[档位] 物理按钮换档 (L{lvl} · {rpm} RPM) —— 已按当前模式接管')
 
     def _run_screen_upload(self, req):
         """在 worker 线程内独占执行屏幕内容上屏; 结束/失败后一律恢复引擎。

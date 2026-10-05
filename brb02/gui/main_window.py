@@ -533,19 +533,15 @@ class MainWindow(QMainWindow):
         self.pages['control'].on_temps(cpu, gpu)
 
     def _on_device_gear(self, level: int, rpm: int):
-        """散热器按钮换档同步 / 档位恢复 (worker 发起)。"""
+        """物理按钮换档被工具箱接管 (worker 发起, 仅告知)。"""
         # 无边框窗口没有状态栏: 换档事件走日志 + 托盘气泡 (防御式, 托盘可能不可用)
-        LOGBUF.write(f'[换档] 已同步: FAN L{level} · {rpm} RPM')
+        LOGBUF.write(f'[档位] 物理按钮换档 (L{level} · {rpm} RPM) —— 已按当前模式接管')
         try:
-            self.tray.showMessage('挡位切换', f'FAN L{level} · {rpm} RPM',
+            self.tray.showMessage('挡位切换', f'物理按钮 L{level} 已按当前模式接管',
                                   QSystemTrayIcon.Information, 1500)
         except Exception:
             pass
         self.tray.setToolTip(f'{APP_NAME} — L{level} · {rpm} RPM')
-        try:
-            self.pages['curve'].sync_from_device(level, rpm)   # 挡位卡/滑条回填 (双向同步)
-        except Exception:
-            pass
         try:
             self.pages['status'].refresh_mode_labels()   # 手动固定转速标签随 cfg 更新
         except Exception:
