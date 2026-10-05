@@ -26,6 +26,7 @@ class Config:
     ble_address: str = ''               # 最近一次成功连接的散热器蓝牙地址 (直连免广播)
     # ---- 外观 ----
     dark: bool = False
+    titlebar_btn: str = 'thin'          # 标题栏窗口按钮档位: 'thin' 纤细 | 'normal' 正常
     # ---- 风扇 ----
     fixed_rpm: int = 1200
     pre_curve_rpm: int = 0              # 档位记忆: 开启智能变频前的手动转速 (关闭后恢复)
@@ -69,7 +70,7 @@ class Config:
     # 散热器屏幕内容 (v3.21: 信息卡默认, 自定义图片是用户的选择)
     screen_mode: str = 'card'           # 'card'=信息卡(默认) | 'custom'=自定义图片
     screen_cards: bool = False          # 情境卡片 (v3.32): 默认关, 有需要的人在设置里开
-    screen_card_auto: bool = True       # 信息卡自动上屏 (连接恢复 + 日期轮转)
+    screen_card_auto: bool = False      # 自动上屏 (连接恢复 + 日期轮转); 默认关, 用户显式开启
     # 挡位预设
     presets: dict = field(default_factory=lambda: dict(DEFAULT_PRESETS))
     autostart_minimized: bool = False
@@ -175,6 +176,8 @@ class Config:
             self.image_fit = 'stretch'
         if self.screen_mode not in ('card', 'custom'):
             self.screen_mode = 'card'
+        if self.titlebar_btn not in ('thin', 'normal'):
+            self.titlebar_btn = 'thin'
 
     _save_lock = threading.Lock()
 

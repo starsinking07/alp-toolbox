@@ -1333,6 +1333,12 @@ class ControlPage(QWidget):
         self.cmb_theme.setCurrentIndex(1 if cfg.dark else 0)
         self.cmb_theme.currentIndexChanged.connect(self._theme_changed)
         cv3.addWidget(_setting_row('界面主题', '默认浅色, 可切换深色', '🌓', self.cmb_theme))
+        self.cmb_btn_style = QComboBox()
+        self.cmb_btn_style.addItems(['细档', '正常档'])
+        self.cmb_btn_style.setCurrentIndex(
+            1 if getattr(cfg, 'titlebar_btn', 'thin') == 'normal' else 0)
+        self.cmb_btn_style.currentIndexChanged.connect(self._btn_style_changed)
+        cv3.addWidget(_setting_row('标题栏按钮', '右上角窗口按钮的粗细档位', '➖', self.cmb_btn_style))
         self.tgl_hotkey = Toggle(cfg.hotkeys_enabled)
         self.tgl_hotkey.toggled = self._hotkey_toggled
         cv3.addWidget(_setting_row('全局快捷键', 'Ctrl+Alt+F1 循环挡位 · Ctrl+Alt+F2 智能变频', '⌨️', self.tgl_hotkey))
@@ -1354,7 +1360,7 @@ class ControlPage(QWidget):
         hv.setSpacing(10)
         card5, _, cv5 = _card(
             '散热器屏幕',
-            '默认显示信息卡: CPU / GPU 型号 + 日期, 每次连接自动更新 (一天至多两次写入)。')
+            '信息卡 (CPU / GPU 型号 + 日期) 自动上屏默认关闭, 可在下方开启; 开启后每次连接自动更新 (一天至多两次写入)。')
         self.tgl_cards = Toggle(getattr(cfg, 'screen_cards', True))
         self.tgl_cards.toggled = self._cards_toggled
         cv5.addWidget(_setting_row(
@@ -1557,6 +1563,12 @@ class ControlPage(QWidget):
         self.ctx['cfg'].dark = (idx == 1)
         self.ctx['cfg'].save()
         self.ctx['main'].apply_theme(self.ctx['cfg'].dark)
+
+    def _btn_style_changed(self, idx):
+        cfg = self.ctx['cfg']
+        cfg.titlebar_btn = 'normal' if idx == 1 else 'thin'
+        cfg.save()
+        self.ctx['main'].titlebar.set_btn_style(cfg.titlebar_btn)
 
     def _hotkey_toggled(self, on):
         self.ctx['cfg'].hotkeys_enabled = on
@@ -2297,7 +2309,7 @@ class ScreenPage(QWidget):
         if w.uploading:
             self.result.setText('设备正在上传, 完成后自动上信息卡。')
         elif not w.device.connected:
-            self.result.setText('已切回信息卡模式 —— 连接散热器后自动上屏。')
+            self.result.setText('已切回信息卡模式 (连接时点本按钮即可上屏)。')
         elif w.device.conn_type == 'ble':
             self.result.setText('已切回信息卡模式 —— 蓝牙通道无法上传, 请改用 USB。')
         else:

@@ -56,6 +56,7 @@ class TitleBar(QWidget):
         h.addWidget(self.badge_rpm)
         h.addStretch(1)
 
+        self.win_btns = []
         for text, obj, cb in (('—', 'WinBtn', self._min), ('□', 'WinBtn', self._max),
                               ('✕', 'WinBtnClose', self._close)):
             b = QPushButton(text)
@@ -64,6 +65,16 @@ class TitleBar(QWidget):
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(cb)
             h.addWidget(b)
+            self.win_btns.append(b)
+        self.set_btn_style(getattr(win.cfg, 'titlebar_btn', 'thin'))
+
+    def set_btn_style(self, mode: str = 'thin'):
+        """窗口按钮字重档位 (用户设置): thin 纤细 (默认) / normal 加粗放大。"""
+        for b in self.win_btns:
+            if mode == 'normal':
+                b.setStyleSheet('font-size: 16px; font-weight: 700;')
+            else:
+                b.setStyleSheet('')   # 清除内联 → 回落全局 QSS 纤细样式
 
     def _min(self):
         self.win.showMinimized()
