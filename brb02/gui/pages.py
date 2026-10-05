@@ -731,10 +731,17 @@ class CurvePage(QWidget):
             gear_row.addWidget(b)
             self.gear_btns.append(b)
         self.gear_group.idClicked.connect(self._gear_clicked)
-        self.gear_btns[1].setChecked(True)
+        # 挡位/滑条回填: 按 cfg.fixed_rpm 就近匹配预设档 (v3.61 修复: 此前硬编码「标准」,
+        # 重启后显示与实际下发转速不符)
+        try:
+            gear_idx = min(range(5), key=lambda i: abs(self._gear_rpm(i) - cfg.fixed_rpm))
+        except Exception:
+            gear_idx = 1
+        self.gear_btns[gear_idx].setChecked(True)
         gv.addLayout(gear_row)
         self.slider12 = GearSlider()
         self.slider12.levelSelected = self._level_selected
+        self.slider12.set_level(gear_idx * 3 + 2)
         gv.addWidget(self.slider12)
         self.lbl_manual_hint = QLabel('智能变频运行中 — 手动挡位暂不可调 (关闭「智能变频」后可调)')
         self.lbl_manual_hint.setObjectName('CardHint')
@@ -747,6 +754,8 @@ class CurvePage(QWidget):
         editor, _, ev_ = _card(None)
         self.curve = CurveEditor(self.dark)
         self.curve.changed = self._curve_changed
+        self.curve.set_curve(cfg.curve)   # 回填已保存曲线 (v3.61 修复: 此前显示默认曲线,
+        #  用户一拖动就会用默认值整条覆盖 cfg.curve)
         ev_.addWidget(self.curve)
         tip = QLabel('拖动圆点调整各温度点的转速 (%) · 实际转速 = 百分比 × 4800')
         tip.setObjectName('CardHint')

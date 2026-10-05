@@ -184,6 +184,7 @@ class DeviceWorker(QThread):
         if st is None:
             # 瞬断重连
             if self.device.connect():
+                self._last_sent_rpm = None   # 重连后强制重发当前目标 (防假成功残留, v3.61)
                 return
             # 确认断线: 双向自动切换探测
             now2 = time.time()
@@ -404,14 +405,20 @@ class DeviceWorker(QThread):
         mem = max(0, min(4800, int(getattr(self, '_pre_curve_rpm', 0)
                                 or self.config.fixed_rpm or 0)))
         level = 4 if mem >= 3800 else 3 if mem >= 3000 else 2 if mem >= 2400 else 1
+        self.config.fixed_rpm = mem
+        self.config.save()
+        if not self.device.connected:
+            # 断线/未连接: _send 会静默吞掉下发, 记"已恢复"是假成功 ——
+            # 置 None 让引擎重连后按 fixed_rpm 自动重发 (v3.61 修复)
+            self._last_sent_rpm = None
+            LOGBUF.write(f'[档位] 设备未连接, 已记忆目标 {mem} RPM (L{level}) —— 重连后自动恢复')
+            return
         try:
             self.device.set_fixed_rpm(mem, level=level)
             self._last_sent_rpm = mem
             self._last_tec_sent = level
             self._last_host_0x24_ts = now
             self._last_send_ts = now
-            self.config.fixed_rpm = mem
-            self.config.save()
             self.deviceGearChanged.emit(level, mem)   # GUI 同步 (日志/托盘/标签)
             LOGBUF.write(f'[档位] 已退出智能变频, 恢复之前的档位: {mem} RPM (L{level})')
         except Exception as e:
@@ -544,6 +551,7 @@ class DeviceWorker(QThread):
         with self._screen_qlock:             # 队列操作持锁 (审计 G6)
             self._screen_queue.clear()       # 手动图片优先: 清掉待执行的自动上屏
         self._upload_req = (path, flip_h, flip_v, fit)
+        self._screen_cancel.clear()   # 新上传不应继承上一次取消的残留状态
 
     def cancel_image_upload(self):
         """请求取消正在进行的上传 (手动/自动上屏一律生效, 尽力而为)。"""
@@ -585,6 +593,7 @@ class DeviceWorker(QThread):
         finally:
             self._uploading = False
             self._upload_cancel.clear()
+            self._screen_cancel.clear()   # 取消按钮双事件置位, 两个都要清 (否则自动上屏永久秒取消)
             # 恢复引擎: 强制重发当前转速 + 立即补推 0x07 参数页
             self._last_sent_rpm = None
             self._last_07_ts = 0.0
