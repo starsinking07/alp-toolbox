@@ -1624,9 +1624,12 @@ class ControlPage(QWidget):
         try:
             if on:
                 exe = self._autostart_exe()
-                flag = ' --tray' if getattr(self.ctx['cfg'], 'autostart_minimized', False) else ''
+                # v3.64 修复: --tray 必须在引号外 —— 之前把 flag 拼进了被引号包裹的
+                # "程序路径"里, 任务执行的程序名变成 "...\Alp工具箱.exe --tray"
+                # (不存在的文件) → 开机自启动静默失效
+                tray = ' --tray' if getattr(self.ctx['cfg'], 'autostart_minimized', False) else ''
                 cmd = (f'schtasks /Create /F /TN "{self._AUTOSTART_TASK}" '
-                       f'/SC ONLOGON /RL HIGHEST /TR "\\"{exe}{flag}\\""')
+                       f'/SC ONLOGON /RL HIGHEST /TR "\\"{exe}\\"{tray}"')
             else:
                 cmd = f'schtasks /Delete /F /TN "{self._AUTOSTART_TASK}"'
             r = subprocess.run(cmd, capture_output=True, creationflags=0x08000000)
