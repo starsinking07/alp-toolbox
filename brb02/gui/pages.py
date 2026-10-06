@@ -2345,10 +2345,14 @@ class ScreenPage(QWidget):
         self.btn_card = QPushButton('恢复信息卡')
         self.btn_card.clicked.connect(self._restore_card)
         self.btn_card.setToolTip('切回默认信息卡 (CPU/GPU 型号 + 日期), 已连接时立即上屏')
+        self.btn_read = QPushButton('备份当前屏图')
+        self.btn_read.clicked.connect(self._read_screen)
+        self.btn_read.setToolTip('从散热器读回当前显示的图片并存为 PNG (约几十秒, USB)')
         row.addWidget(self.btn_pick)
         row.addWidget(self.btn_up)
         row.addWidget(self.btn_cancel)
         row.addWidget(self.btn_card)
+        row.addWidget(self.btn_read)
         row.addStretch(1)
         cv.addLayout(row)
 
@@ -2396,6 +2400,7 @@ class ScreenPage(QWidget):
         w.uploadProgress.connect(self._on_progress)
         w.uploadFinished.connect(self._on_finished)
         w.connectionChanged.connect(self._on_conn_changed)
+        w.screenReadFinished.connect(self._on_read_finished)
         self._sync_buttons()
 
         last = getattr(self.cfg, 'last_image_path', '') or ''
@@ -2527,6 +2532,8 @@ class ScreenPage(QWidget):
         screen_busy = bool(getattr(w, 'screen_active', False))
         self.btn_up.setEnabled(usb_ok and self._path is not None and self._img_valid
                                and not self._busy and not screen_busy)
+        if hasattr(self, 'btn_read'):
+            self.btn_read.setEnabled(usb_ok and not self._busy and not screen_busy)
         if not getattr(w.device, 'connected', False):
             tip = '设备未连接'
         elif not usb_ok:
@@ -2567,6 +2574,37 @@ class ScreenPage(QWidget):
         self.ctx['worker'].cancel_image_upload()
         self.btn_cancel.setEnabled(False)
         self.result.setText('正在取消...')
+
+    def _read_screen(self):
+        if self._busy:
+            return
+        w = self.ctx['worker']
+        if not w.device.connected or w.device.conn_type != 'usb':
+            self.result.setText('屏图备份仅支持 USB 连接 —— 请插线后重试。')
+            return
+        if getattr(w, 'screen_active', False):
+            self.result.setText('自动上屏执行中, 请等完成后再备份。')
+            return
+        if not w.start_screen_read():
+            self.result.setText('当前忙 (上传/读回/自动上屏进行中), 请稍后再试。')
+            return
+        self._busy = True
+        self.btn_up.setEnabled(False)
+        self.btn_read.setEnabled(False)
+        self.bar.setValue(0)
+        self.result.setText('正在从散热器读回当前屏图… (约几十秒, 勿拔线)')
+
+    def _on_read_finished(self, res: dict):
+        self._busy = False
+        self._sync_buttons()
+        if res.get('canceled'):
+            self.result.setText('屏图备份已取消。')
+            return
+        if res.get('ok'):
+            p = res.get('saved_path', '')
+            self.result.setText(f'屏图备份成功 ({res.get("frames", 0)} 帧) —— 已保存: {p}')
+        else:
+            self.result.setText(f"屏图备份失败: {res.get('reason', '?')}")
 
     def _restore_card(self):
         """切回默认信息卡: 已连接 (USB) 时立即上屏, 否则保存偏好待连接后生效。"""

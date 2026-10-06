@@ -248,6 +248,95 @@ class Brb02Device:
         base.update(kw)
         return base
 
+    def read_screen_image(self, progress_cb=None, cancel_event=None) -> dict:
+        """读回散热器当前屏图 (0xC7 起读 + 0xC8 逐帧拉, ~2096 帧, 约几十秒)。
+
+        协议 (FanControlPortable/PIut02 交叉验证): 0xC7 空载荷 → 设备推首帧 0xA4;
+        之后每发一条 0xC8 设备回一条 0xA4 (1:1)。0xA4 帧: [A4][LEN][seq u16le]
+        [tag][载荷 LEN-6][CK], 载荷按到达顺序拼接 = 121,552B 画布 (RGB565BE);
+        结束条件 = seq 低 15 位 <= 1 (尾帧 LEN=48)。
+        返回 {'ok','reason','canvas':bytes|None,'frames','elapsed_ms','canceled'}。
+        ⚠️ 独占操作: 调用方须在 worker 线程暂停轮询/下发。"""
+        from . import screen_upload as su
+        if self.conn_type != 'usb':
+            return self._upload_fail('屏图读回仅支持 USB')
+        if self._t is None:
+            return self._upload_fail('设备未连接')
+        t = self._t
+        t0 = time.time()
+        total_expect = su.CANVAS_BYTES
+        frames_max = 2104                          # 2096 + 余量
+        out = bytearray()
+        n_frames = 0
+        canceled = False
+
+        C8_CMD = bytes([0xA5, 0x04, 0xC8, 0x71])   # 拉取下一条 (CK=sum)
+
+        def _pull(send_cmd):
+            """可选发一条命令并收一帧 0xA4 (超时返回 (None, False))。"""
+            if send_cmd is not None:
+                t.write_exact(send_cmd)
+            end = time.time() + 2.0
+            while time.time() < end:
+                if cancel_event is not None and cancel_event.is_set():
+                    return None, True
+                try:
+                    rx = bytes(t.read_exact(200, 64))
+                except Exception:
+                    continue
+                if len(rx) >= 6 and rx[0] == 0xA4 and 6 <= rx[1] <= 64:
+                    return rx[5:rx[1] - 1], False   # 载荷 (去 CK)
+            return None, False
+
+        try:
+            import ctypes
+            ctypes.windll.winmm.timeBeginPeriod(1)
+        except Exception:
+            pass
+        try:
+            t.write_exact(bytes([0xA5, 0x04, 0xC7, 0x70]))   # 0xC7 起读 → 设备直接推首帧
+            for i in range(frames_max):
+                # 首帧由 0xC7 直接推来 (只收); 之后每帧先发 0xC8 再收 (1:1)
+                payload, canceled = _pull(None if i == 0 else C8_CMD)
+                if canceled:
+                    canceled = True
+                    break
+                if payload is None:
+                    return self._upload_fail(
+                        f'屏图读回中断 (第 {i + 1} 帧 2s 未到达, 已收 {len(out)}B)',
+                        elapsed_ms=(time.time() - t0) * 1000.0, sent=n_frames)
+                out += payload
+                n_frames += 1
+                if progress_cb is not None and i % 16 == 0:
+                    try:
+                        progress_cb(min(len(out), total_expect), total_expect)
+                    except Exception:
+                        pass
+                if len(out) >= total_expect:        # 尾帧 42B 凑满即停 (seq≤1 同效)
+                    break
+            if len(out) < total_expect:
+                return self._upload_fail(
+                    f'屏图读回不完整 (已收 {len(out)}/{total_expect}B, {n_frames} 帧)',
+                    elapsed_ms=(time.time() - t0) * 1000.0, sent=n_frames)
+            if progress_cb is not None:
+                try:
+                    progress_cb(total_expect, total_expect)
+                except Exception:
+                    pass
+            return {'ok': True, 'reason': f'读回成功 ({n_frames} 帧)',
+                    'canvas': bytes(out[:total_expect]), 'frames': n_frames,
+                    'elapsed_ms': (time.time() - t0) * 1000.0, 'canceled': False}
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return self._upload_fail(f'屏图读回异常: {e}',
+                                     elapsed_ms=(time.time() - t0) * 1000.0, sent=n_frames)
+        finally:
+            try:
+                ctypes.windll.winmm.timeEndPeriod(1)
+            except Exception:
+                pass
+
     def upload_image(self, path: str, heartbeats=None, progress_cb=None,
                      cancel_event=None, flip_h: bool = False,
                      flip_v: bool = False, fit: str = 'stretch',

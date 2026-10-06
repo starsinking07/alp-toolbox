@@ -77,6 +77,7 @@ class DeviceWorker(QThread):
     uploadProgress = Signal(int, int)      # 屏幕上传进度 (已发数据帧, 总 2096)
     uploadFinished = Signal(dict)          # 上传结束 (结果 dict, 见 device.upload_canvas)
     uploadCountChanged = Signal(int)       # 磨损计数变化 (累计成功上屏次数, 0.1.9)
+    screenReadFinished = Signal(dict)      # 屏图读回结束 (0.1.8 历史图片备份)
     deviceGearChanged = Signal(int, int)   # 散热器实体按钮换档 (level, rpm) — 0x25 轮询检测
 
     def __init__(self, config: Config, parent=None):
@@ -102,6 +103,7 @@ class DeviceWorker(QThread):
         self._last_send_ts = 0.0
         self._last_scene_key = None
         self._temp_wall_active = False        # 温度墙激活态 (0.1.9)
+        self._read_req = False                # 屏图读回请求 (0.1.8)
         self._scene_applied_key = None        # 场景应用态 (('p',idx)/('none',proc))
         self._scene_saved = None              # 进入场景前快照 (0.1.9)
         self._scene_rpm_applied = False     # 情景转速已下发 (规则清空后需恢复, 审计 G11)
@@ -192,6 +194,11 @@ class DeviceWorker(QThread):
             path, fh, fv, fit = self._upload_req
             self._upload_req = None
             self._run_image_upload(path, fh, fv, fit)
+            return
+        # 屏图读回 (0.1.8): 独占执行 (~30-60s), 期间同样独占
+        if getattr(self, '_read_req', False):
+            self._read_req = False
+            self._run_screen_read()
             return
         # 屏幕上屏队列: 串行执行 —— 未完成任务完成后再取下一个 (用户原则)
         if self._screen_queue and not self._uploading and self._upload_req is None:
@@ -624,6 +631,65 @@ class DeviceWorker(QThread):
         return (self._uploading or self._upload_req is not None
                 or bool(self._screen_queue))
 
+    def start_screen_read(self) -> bool:
+        """请求读回当前屏图 (0xC7/0xC8, 约几十秒); 返回 False = 忙/未连接。"""
+        if self._uploading or self._upload_req is not None or self._read_req:
+            return False
+        if not self.device.connected or self.device.conn_type != 'usb':
+            return False
+        self._read_req = True
+        return True
+
+    def _run_screen_read(self):
+        """worker 线程内独占执行屏图读回; 结束后恢复引擎 (同上传路径)。"""
+        import datetime
+        from .logbuf import LOGBUF
+        LOGBUF.write('[屏幕] 开始读回当前屏图 (0xC7/0xC8, 约几十秒)...')
+        self._uploading = True
+        try:
+            res = self.device.read_screen_image(
+                progress_cb=lambda s, t: self.uploadProgress.emit(s, t),
+                cancel_event=self._upload_cancel)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            res = {'ok': False, 'reason': f'异常: {e}', 'canvas': None,
+                   'frames': 0, 'elapsed_ms': 0.0, 'canceled': False}
+        finally:
+            self._uploading = False
+            self._upload_cancel.clear()
+            self._screen_cancel.clear()
+            self._last_sent_rpm = None
+            self._last_07_ts = 0.0
+        saved_path = ''
+        if res.get('ok') and res.get('canvas'):
+            try:
+                out_dir = os.path.join(os.path.expanduser('~'), 'Pictures', 'Alp工具箱')
+                os.makedirs(out_dir, exist_ok=True)
+                saved_path = os.path.join(
+                    out_dir, f'screen_{datetime.datetime.now():%Y%m%d_%H%M%S}.png')
+                from .screen_upload import qimage_to_rgb565_be  # noqa: F401  (确认模块可用)
+                self._save_canvas_png(res['canvas'], saved_path)
+                LOGBUF.write(f'[屏幕] 屏图已备份: {saved_path}')
+            except Exception as e:
+                LOGBUF.write(f'[屏幕] PNG 落盘失败: {e}')
+        LOGBUF.write(f'[屏幕] 读回结束: {res.get("reason", "")} '
+                     f'({res.get("frames", 0)} 帧)')
+        res = dict(res, saved_path=saved_path)
+        self.uploadProgress.emit(2096, 2096)
+        self.screenReadFinished.emit(res)
+
+    def _save_canvas_png(self, canvas: bytes, path: str):
+        """121,552B RGB565BE 画布 → PNG (RGB565BE→RGB32 逐像素)。"""
+        from PySide6.QtGui import QImage, QPixmap
+        import array
+        W, H = 428, 142
+        a = array.array('H', canvas)
+        a.byteswap()                          # BE → LE
+        buf = a.tobytes()                     # 保活至 copy (悬挂指针教训)
+        img = QImage(buf, W, H, W * 2, QImage.Format_RGB16).copy()
+        img.save(path)
+
     def _run_image_upload(self, path, flip_h, flip_v, fit):
         """在 worker 线程内独占执行上传; 结束/失败/取消后一律恢复引擎。"""
         from .logbuf import LOGBUF
@@ -649,6 +715,22 @@ class DeviceWorker(QThread):
                         'first_bad': None, 'status_hist': {}, 'c4_ack_ms': 0.0,
                         'elapsed_ms': 0.0, 'canceled': False, 'sent': 0}
 
+        base_ms = 4.0 if path.lower().endswith('.bin') else None   # 历史画布 = 预验证, 走 4ms 快传
+        def _once():
+            try:
+                return self.device.upload_image(
+                    path, heartbeats=self._live_heartbeats(),
+                    progress_cb=lambda s, t: self.uploadProgress.emit(s, t),
+                    cancel_event=self._upload_cancel, flip_h=flip_h, flip_v=flip_v, fit=fit,
+                    base_ms=base_ms)
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                traceback.print_exc()
+                LOGBUF.write(f'[屏幕] 上传异常: {e} | ' + tb)
+                return {'ok': False, 'reason': f'异常: {e}', 'c6_total': 0, 'c6_bad': 0,
+                        'first_bad': None, 'status_hist': {}, 'c4_ack_ms': 0.0,
+                        'elapsed_ms': 0.0, 'canceled': False, 'sent': 0}
         try:
             res = _once()
             # 整流重传兜底 (2026-10-06 诊断包案): 页边界 0x0C 级联失败后重传即愈
