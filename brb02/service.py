@@ -551,25 +551,40 @@ class DeviceWorker(QThread):
     def _host_info_entries(self, cpu: float, gpu: float):
         """构造 0x07 的 7 项 (ID, 值) —— 参数页推送与图片上传尾部心跳共用。
 
-        2026-10-06 定案 (capme3 抓包): 设备参数页三槽标签固画 (GPU℃←ID01 /
-        CPU℃←ID00 / 百分槽←ID03), **槽绑定固件固定不可配** (官方"参数选项"弹窗
-        点确定不发任何命令, 系摆设; 0xC2 为官方保活心跳)。ID02=GPU 负载 /
-        ID05=内存 / ID06=CPU 负载 (设备无对应显示槽, 推真值无害);
-        ID03=0 回旧版行为 (第三槽数据源功能已搁置, 留档见 config.param_slot3
-        注释与 temps.load_snapshot 负载体); ID07=当日分钟数 (屏幕按 值/60:值%60
-        渲染, 误发 HHMM 会显示 PM 33:58)。"""
+        **ID 语义 2026-10-06 定案 (采纳 FanControlPortable/PIut02 的 DLL 静态
+        分析表, 与 cap6 实测值全部吻合)**:
+          ID00=CPU温 ID01=GPU温 ID02=CPU负载% ID03=GPU负载% ID04=风扇转速
+          (设备本地, 官方不推) ID05=磁盘占用率%(系统盘空间) ID06=内存占用率%
+          ID07=时间 (时*60+分, 屏幕按 值/60:值%60 渲染)。
+        旧表 (02=GPU 功/负载, 03=磁盘, 05=恒74, 06=GPU 热点) 系误判, 作废。
+        历史记录: 03=GPU 负载 (v3.2 抓包 0-13=待机), 06=内存 (cap6 50-54 恒), 均吻合。"""
         tp = self.temps
         lt = time.localtime()
         gt = int(round(gpu)) if gpu and gpu > 1 else 0
         return [
             (0x00, int(round(cpu)) if cpu and cpu > 1 else 0),
-            (0x01, gt),                                # GPU 温度 (槽1)
-            (0x02, int(round(tp.gpu_load)) if tp.gpu_load is not None else 0),
-            (0x03, 0),                                 # 百分槽 (数据源功能搁置, 留档)
-            (0x05, int(round(tp._ram_percent() or 0))),
-            (0x06, int(round(tp.cpu_load)) if tp.cpu_load is not None else 0),
+            (0x01, gt),                                # GPU 温度
+            (0x02, int(round(tp.cpu_load)) if tp.cpu_load is not None else 0),   # CPU 负载%
+            (0x03, int(round(tp.gpu_load)) if tp.gpu_load is not None else 0),   # GPU 负载%
+            (0x05, int(tp._disk_percent() or 0)),      # 磁盘占用率% (系统盘空间)
+            (0x06, int(round(tp._ram_percent() or 0))),  # 内存占用率%
             (0x07, lt.tm_hour * 60 + lt.tm_min),
         ]
+
+    def send_param_page_config(self):
+        """下发 0xC2 SetLcdShowPos (参数页三格显示配置), 等 ACK 记日志。
+        时机: 用户在设置里修改后 + 每次连接成功后 (设备端无掉电保存证据,
+        官方每次会话开场也会重推配置类命令)。"""
+        from .logbuf import LOGBUF
+        try:
+            ids = [int(i) for i in (getattr(self.config, 'param_page_ids', None) or [0, 1, 7])][:3]
+            f = protocol.set_lcd_show_pos(ids)
+            acks = self.device._send(f)
+            ok = any(c == 0xC2 for c, _ in acks)
+            LOGBUF.write(f'[参数页] 显示配置已下发 (id={ids}) '
+                         + ('设备已确认 ✓' if ok else '未收到 ACK (设备可能未就绪)'))
+        except Exception as e:
+            LOGBUF.write(f'[参数页] 配置下发失败: {e}')
 
     def _push_host_info07(self, cpu: float, gpu: float):
         """屏幕参数页推送 (1Hz), 格式/ID 语义见 protocol.build_host_info。"""
@@ -1061,6 +1076,10 @@ class DeviceWorker(QThread):
             self._last_dev_rpm = None
             self._scene_applied_key = None      # 重连后场景重新评估, 快照作废 (自检②)
             self._scene_saved = None
+            try:
+                self.send_param_page_config()   # 重连后重推参数页显示配置 (0xC2)
+            except Exception:
+                pass
             self._connect_ts = time.time()
             try:
                 self.emit_info()

@@ -1474,6 +1474,10 @@ class ControlPage(QWidget):
         self.lbl_wear = QLabel(
             f'📊 屏幕闪存已上屏 {n} 次' + (f' ≈ 寿命消耗 {n / 10.0:.1f}% (按 10 万次擦写/页 估算)' if n else ''))
 
+        btn_param = QPushButton('参数页显示…')
+        btn_param.clicked.connect(self._param_options)
+        btn_param.setToolTip('自定义散热器参数页三格显示的参数与左右顺序 (官方同款协议)')
+        cv5.addWidget(_setting_row('参数页显示', '三格各选一项参数 (左→右), 保存后推送到散热器屏幕', '📺', btn_param))
         self.lbl_wear.setObjectName('CardHint')
         self.lbl_wear.setWordWrap(True)
         cv5.addWidget(self.lbl_wear)
@@ -1605,6 +1609,44 @@ class ControlPage(QWidget):
             pass
 
 
+
+    def _param_options(self):
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+        from ..protocol import LCD_PARAM_DEFS
+        cfg = self.ctx['cfg']
+        cur = [int(i) for i in (getattr(cfg, 'param_page_ids', None) or [0, 1, 7])][:3]
+        dlg = QDialog(self)
+        dlg.setWindowTitle('参数页显示')
+        v = QVBoxLayout(dlg)
+        title = QLabel('参数页显示')
+        title.setObjectName('PageTitle')
+        title.setAlignment(Qt.AlignCenter)
+        v.addWidget(title)
+        hint = QLabel('三格各选一项参数, 左→右即屏幕从左到右 (最多 3 项)')
+        hint.setObjectName('CardHint')
+        v.addWidget(hint)
+        combos = []
+        for gi, cur_id in enumerate(cur):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f'第 {gi + 1} 格'))
+            cmb = QComboBox()
+            for pid, name in LCD_PARAM_DEFS:
+                cmb.addItem(name, pid)
+            cmb.setCurrentIndex(max(0, cmb.findData(cur_id)))
+            row.addWidget(cmb)
+            v.addLayout(row)
+            combos.append(cmb)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        if dlg.exec() == QDialog.Accepted:
+            cfg.param_page_ids = [c.currentData() for c in combos]
+            cfg.save()
+            try:
+                self.ctx['worker'].send_param_page_config()
+            except Exception:
+                pass
 
     def _on_upload_count(self, n):
         try:

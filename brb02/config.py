@@ -76,6 +76,10 @@ class Config:
     image_fit: str = 'stretch'          # 'stretch'=拉伸铺满 | 'cover'=等比放大后居中裁边
     # 屏幕写入磨损计数 (0.1.9): 累计成功上屏次数
     screen_upload_count: int = 0
+    # 屏幕参数页显示配置 (0.1.8): 0xC2 SetLcdShowPos 三格的参数 id (最多 3,
+    # 顺序=屏幕左右)。默认 [0, 1, 7] = CPU温度/GPU温度/时间 (官方默认)。
+    # 可选 id 见 protocol.LCD_PARAM_DEFS。设备槽位/几何随此命令配置。
+    param_page_ids: list = field(default_factory=lambda: [0, 1, 7])
     # 屏幕参数页第三槽数据源 (留档, 未启用): 设备三槽标签固画 (GPU℃/CPU℃//%) 且
     # 槽绑定固件固定, 第三槽 (ID03) 数据源选择经真机验证未生效, 暂时搁置。
     # 可选: cpu_load gpu_load ram disk; temps.load_snapshot() 负载体已就绪。

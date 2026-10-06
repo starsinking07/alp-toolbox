@@ -257,6 +257,22 @@ class TempReader:
         return cpu_l, gpu_l, ram_u, disk_a
 
     @staticmethod
+    def _disk_percent() -> float | None:
+        """系统盘空间占用% (ctypes GetDiskFreeSpaceEx, 对齐官方"磁盘占用率"语义)。"""
+        import ctypes
+        try:
+            total = ctypes.c_ulonglong()
+            free = ctypes.c_ulonglong()
+            r = ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+                os.environ.get('SystemDrive', 'C:') + os.sep,
+                None, ctypes.byref(total), ctypes.byref(free))
+            if r and total.value > 0:
+                return round((total.value - free.value) * 100.0 / total.value, 1)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
     def _ram_percent() -> float | None:
         """内存占用% (ctypes GlobalMemoryStatusEx, 零依赖)。"""
         import ctypes
@@ -281,7 +297,8 @@ class TempReader:
         内存走 GlobalMemoryStatusEx (零依赖); CPU/GPU 负载与磁盘活动走 LHM (需管理员)。"""
         with self._lock:
             return {'cpu_load': self.cpu_load, 'gpu_load': self.gpu_load,
-                    'ram': self._ram_percent(), 'disk': self.disk_active}
+                    'ram': self._ram_percent(), 'disk': self._disk_percent(),
+                    'disk_active': self.disk_active}
 
     def _scan_cpu_power(self, computer) -> float | None:
         for hw in computer.Hardware:

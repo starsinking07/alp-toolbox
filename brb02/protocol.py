@@ -145,6 +145,38 @@ def set_cooling_curve(anchors: list[tuple[int, int]], level: int = 1) -> bytes:
     return build_frame(Cmd.SET_COOLING_CONFIG, params)
 
 
+# ---- 屏幕参数页 (0xC2 SetLcdShowPos, 2026-10-06 定案: FanControlPortable/PIut02
+# 交叉验证 + capme3/cap6 帧样本吻合; 旧"参数选项"误判已修正) ----
+# 0xC2 载荷 = [0x00][pos][条数] + 3×[id][x u16le][y u8]。
+# 参数 id 表 (独立于 0x07 的数值 ID): 0=CPU温 1=GPU温 2=CPU负载 3=GPU负载
+# 4=风扇转速(设备本地值) 5=磁盘占用 6=内存占用 7=时间。
+# 官方默认三项 = [0, 1, 7] (CPU温度/GPU温度/时间)。
+# 几何 (pos=0): 三格 x = 10/143/276, y = 100。pos 只标定 0 (>0 无样本, 勿发)。
+# 条目必须 4 字节 (3 字节整帧拒绝); 无值读回, ACK 是唯一确认手段。
+LCD_PARAM_DEFS = [
+    (0, 'CPU 温度'), (1, 'GPU 温度'), (2, 'CPU 负载'), (3, 'GPU 负载'),
+    (4, '风扇转速'), (5, '磁盘占用率'), (6, '内存占用'), (7, '时间'),
+]
+LCD_SHOW_POS_X = (10, 143, 276)
+LCD_SHOW_POS_Y = 100
+
+
+def set_lcd_show_pos(ids, pos: int = 0) -> bytes:
+    """构造 0xC2 SetLcdShowPos 帧: 指定参数页三格显示的参数类型与左右顺序。
+
+    ids: 最多 3 个参数 id (LCD_PARAM_DEFS); pos: 布局组号 (仅标定 0, >0 勿发)。
+    设备不校验 id (原样透传), 越界 id 会显示空位 —— 调用方须自行过滤。
+    发送后等 ACK (cmd=0xC2) 即为唯一确认, 无值读回。"""
+    ids = list(ids)[:3]
+    if not 0 <= pos <= 0:
+        raise ValueError('pos 仅标定 0 (>0 无官方样本, 拒发)')
+    params = bytes([0x00, pos & 0xFF, len(ids)])
+    for i, pid in enumerate(ids):
+        x = LCD_SHOW_POS_X[i % 3]
+        params += bytes([pid & 0xFF, x & 0xFF, (x >> 8) & 0xFF, LCD_SHOW_POS_Y])
+    return build_frame(0xC2, params)
+
+
 def restore_factory() -> bytes:
     """恢复出厂设置 (抢救用)"""
     return build_frame(Cmd.RESTORE_FACTORY)
