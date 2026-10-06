@@ -977,13 +977,10 @@ class DeviceWorker(QThread):
             'curve': [list(x) for x in (cfg.curve or [])],
         }
         try:
-            r = self.device._send(pc.get_cur_rgb())
+            r = self.device._send(protocol.get_cur_rgb())
             for cmd, data in r:
                 if cmd == 0x13 and len(data) >= 9:
-                    eff = pc.parse_rgb_effect(data)
-                    if eff:
-                        self._scene_saved['rgb'] = eff.get('cfg', b'') + bytes(
-                            [eff['mode'] & 0xFF]) + eff['cfg'][5:8] + bytes([eff['extra']])
+                    self._scene_saved['rgb9'] = bytes(data[:9])   # 完整 0x13 应答 (9B)
         except Exception:
             pass                              # 读不到灯效就不恢复灯效 (rpm/曲线照常)
 
@@ -1005,11 +1002,11 @@ class DeviceWorker(QThread):
             lm = prof.get('light_mode', -1)
             if lm is not None and int(lm) >= 0:
                 saved = self._scene_saved or {}
-                base = saved.get('rgb')
-                if base and len(base) >= 9:
-                    # 原参数只换模式位 (base = cfg5 + mode + rgb3 + extra)
-                    params = bytes(base[:5]) + bytes([int(lm) & 0xFF]) + base[6:9]
-                    self.device._send(pc.build_frame(0x12, params))
+                rgb9 = saved.get('rgb9')
+                if rgb9 and len(rgb9) >= 8:
+                    # 0x12 params = [mode][speed16][亮][彩][R][G][B] —— 原参数只换模式位
+                    params = bytes([int(lm) & 0xFF]) + rgb9[1:8]
+                    self.device._send(protocol.build_frame(0x12, params))
             LOGBUF.write(f"[场景] 应用 {prof.get('name', '?')} "
                          f"(rpm={rpm or '-'} 方案={scheme or '-'} 灯效={lm})")
         except Exception as e:
@@ -1023,8 +1020,8 @@ class DeviceWorker(QThread):
                 self.config.curve_active = saved['curve_active']
                 self.config.curve = [list(x) for x in saved['curve']]
                 self.config.save()
-            if 'rgb' in saved:
-                self.device._send(pc.build_frame(0x12, saved['rgb'][:9]))
+            if 'rgb9' in saved:
+                self.device._send(protocol.build_frame(0x12, bytes(saved['rgb9'][:8])))
             self._last_sent_rpm = None        # 引擎下 tick 恢复固定转速/曲线
             self._scene_saved = None
             LOGBUF.write('[场景] 已恢复进入前状态')
