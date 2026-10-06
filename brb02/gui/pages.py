@@ -1262,6 +1262,7 @@ class ControlPage(QWidget):
         self.spin_wall.setAlignment(Qt.AlignCenter)
         self.spin_wall.setValue(int(cfg.temp_wall_temp))
         self.spin_wall.valueChanged.connect(self._wall_temp_changed)
+        wh.addWidget(self.tgl_wall)          # ⚠️ 开关必须加入容器 (修复: 构造了但没 add, Toggle 不显示)
         wh.addWidget(self.spin_wall)
         wall_w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.row_wall = _setting_row('温度墙保护', '过热时无视一切设置强制拉满, 降温 3°C 解除', '🧱', wall_w)
