@@ -36,9 +36,9 @@ class Cmd:
     GET_CUR_RGB_EFFECTS    = 0x13   # ✓ -> 9字节数据: [配置头5B][R][G][B][动态1B]
     GET_ANY_RGB_EFFECTS    = 0x14   # ✓ +idx -> 12字节
     SET_RGB_EFFECTS        = 0x12   # ✓ (2026-10-02 USBPcap 实测) 参数=GET前5字节原样+RGB
-    GET_LCD_SCREEN_SWITCH  = 0x6A   # ✓ -> [05][6A][on][x]
+    GET_LCD_SCREEN_SWITCH  = 0x6A   # ✓ -> [05][6A][on][x]; 对应 set = 0xC0 (DLL 实锤 2026-10-06)
     RESTORE_FACTORY        = 0xF0   # ✓ [A5][04][F0][99] (rescue 用过)
-    ENTER_BOOT_MODE        = 0xF5   # ✓ [A5][04][F5][9E] (升级引导)
+    ENTER_BOOT_MODE        = 0x05   # ✓ [A5][03][05][CK] 短形态即触发 (盲扫实锤, 见 enter_boot_mode)
     GET_FIRMWARE_STRING    = 0x01   # ✓ [A5][03][01][A9] -> 完整版本串
 
 
@@ -147,7 +147,10 @@ def restore_factory() -> bytes:
 
 
 def enter_boot_mode() -> bytes:
-    """进入升级引导 (固件重刷前置)"""
+    """进入升级引导 (固件重刷前置)。⚠️ 实锤 (2026-10-06 盲扫误触发):
+    cmd=0x05 (DLL coolerEnterBootMode 内部帧构造), 短形态 A5 03 05 CK 即触发,
+    设备立即以 bootloader VID/PID 2B7E:B651 重新枚举 (拔插 USB 恢复)。
+    旧标注 0xF5 有误 —— 0xF5 实为产测按键推送 (DLL coolerFactoryTestKeyPress)。"""
     return build_frame(Cmd.ENTER_BOOT_MODE)
 
 
