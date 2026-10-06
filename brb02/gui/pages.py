@@ -2412,14 +2412,20 @@ class ScreenPage(QWidget):
     # ---- 预览 ----
     @staticmethod
     def _load_canvas_bin(path: str) -> QImage:
-        """官方缓存画布 (121,552B RGB565BE) → QImage (0.1.9 历史图片)。"""
+        """官方缓存画布 (121,552B RGB565 **大端**) → QImage。
+
+        ⚠️ Format_RGB16 是小端解读 —— 必须先 byteswap, 否则每像素通道错乱 (花屏)。"""
         try:
             data = open(path, 'rb').read()
         except Exception:
             return QImage()
         if len(data) != SCREEN_W * SCREEN_H * 2:
             return QImage()
-        img = QImage(data, SCREEN_W, SCREEN_H, SCREEN_W * 2, QImage.Format_RGB16)
+        import array
+        a = array.array('H', data)
+        a.byteswap()                         # BE → LE (Qt Format_RGB16 期望小端)
+        img = QImage(bytes(a.tobytes()), SCREEN_W, SCREEN_H, SCREEN_W * 2,
+                     QImage.Format_RGB16)
         return img.copy()                    # 脱离 data 缓冲
 
     def _render_preview(self):
