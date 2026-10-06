@@ -76,9 +76,9 @@ class Config:
     image_fit: str = 'stretch'          # 'stretch'=拉伸铺满 | 'cover'=等比放大后居中裁边
     # 屏幕写入磨损计数 (0.1.9): 累计成功上屏次数
     screen_upload_count: int = 0
-    # 屏幕参数页第三槽数据源 (0.1.8): 设备三槽标签固画 (GPU℃/CPU℃//%), 前两槽
-    # 恒为温度, 第三槽 (%) 显示哪个数据源可选。可选:
-    #   cpu_load(默认) gpu_load ram disk
+    # 屏幕参数页第三槽数据源 (留档, 未启用): 设备三槽标签固画 (GPU℃/CPU℃//%) 且
+    # 槽绑定固件固定, 第三槽 (ID03) 数据源选择经真机验证未生效, 暂时搁置。
+    # 可选: cpu_load gpu_load ram disk; temps.load_snapshot() 负载体已就绪。
     param_slot3: str = 'cpu_load'
     # 散热器屏幕内容 (v3.21: 信息卡默认, 自定义图片是用户的选择)
     screen_mode: str = 'card'           # 'card'=信息卡(默认) | 'custom'=自定义图片

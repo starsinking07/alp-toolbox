@@ -547,54 +547,24 @@ class DeviceWorker(QThread):
         return target
 
     # ============ 0x07 主机参数推送 (屏幕参数页数据源) ============
-    # 参数页 ID 映射 (0.1.8, 官方"参数选项"逆向定案):
-    # 官方 8 项中"风扇转速"是设备本地数据 (0x06), 其余 7 项 = 0x07 的 7 个 ID:
-    # ID00=CPU温 ID01=GPU温 ID02=GPU负载 ID03=磁盘占用率 ID05=运行使用率(内存)
-    # ID06=CPU负载 (2026-10-06 修正: 旧标注"GPU 热点"系误判) ID07=时间
-    PARAM_DEFS = [
-        ('cpu_temp', 0x00), ('gpu_temp', 0x01), ('gpu_load', 0x02),
-        ('disk', 0x03), ('ram', 0x05), ('cpu_load', 0x06), ('time', 0x07),
-    ]
-
-    def _param_value(self, key: str, cpu: float, gpu: float) -> int:
-        """参数选项某项的实时数值 (0~999 整数; 无读数回 0)。"""
-        tp = self.temps
-        if key == 'cpu_temp':
-            return int(round(cpu)) if cpu and cpu > 1 else 0
-        if key == 'gpu_temp':
-            return int(round(gpu)) if gpu and gpu > 1 else 0
-        if key == 'gpu_load':
-            return int(round(tp.gpu_load)) if tp.gpu_load is not None else 0
-        if key == 'cpu_load':
-            return int(round(tp.cpu_load)) if tp.cpu_load is not None else 0
-        if key == 'disk':
-            return int(round(tp.disk_active)) if tp.disk_active is not None else 0
-        if key == 'ram':
-            return int(round(tp._ram_percent() or 0))
-        if key == 'time':
-            lt = time.localtime()
-            return lt.tm_hour * 60 + lt.tm_min
-        return 0
-
     def _host_info_entries(self, cpu: float, gpu: float):
         """构造 0x07 的 7 项 (ID, 值) —— 参数页推送与图片上传尾部心跳共用。
 
         2026-10-06 定案 (capme3 抓包): 设备参数页三槽标签固画 (GPU℃←ID01 /
-        CPU℃←ID00 / 第三槽"%"←ID03), **槽绑定固件固定不可配** (官方"参数选项"
-        弹窗点确定不发任何命令, 系摆设); 0xC2 为官方保活心跳 (三递增计数)。
-        因此推送恒为 7 项模板, **第三槽 (ID03) 的数据源由 config.param_slot3
-        选择** (CPU负载/GPU负载/内存/磁盘)。ID02=GPU 负载 / ID06=CPU 负载
-        (设备无对应槽, 推真值无害); ID07=时间。"""
+        CPU℃←ID00 / 百分槽←ID03), **槽绑定固件固定不可配** (官方"参数选项"弹窗
+        点确定不发任何命令, 系摆设; 0xC2 为官方保活心跳)。ID02=GPU 负载 /
+        ID05=内存 / ID06=CPU 负载 (设备无对应显示槽, 推真值无害);
+        ID03=0 回旧版行为 (第三槽数据源功能已搁置, 留档见 config.param_slot3
+        注释与 temps.load_snapshot 负载体); ID07=当日分钟数 (屏幕按 值/60:值%60
+        渲染, 误发 HHMM 会显示 PM 33:58)。"""
         tp = self.temps
         lt = time.localtime()
         gt = int(round(gpu)) if gpu and gpu > 1 else 0
-        src3 = getattr(self.config, 'param_slot3', 'cpu_load') or 'cpu_load'
-        v3 = self._param_value(src3, cpu, gpu)
         return [
             (0x00, int(round(cpu)) if cpu and cpu > 1 else 0),
             (0x01, gt),                                # GPU 温度 (槽1)
             (0x02, int(round(tp.gpu_load)) if tp.gpu_load is not None else 0),
-            (0x03, v3),                                # 参数页第三槽 (可配数据源)
+            (0x03, 0),                                 # 百分槽 (数据源功能搁置, 留档)
             (0x05, int(round(tp._ram_percent() or 0))),
             (0x06, int(round(tp.cpu_load)) if tp.cpu_load is not None else 0),
             (0x07, lt.tm_hour * 60 + lt.tm_min),

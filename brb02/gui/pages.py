@@ -1472,16 +1472,7 @@ class ControlPage(QWidget):
         n = int(getattr(cfg, 'screen_upload_count', 0) or 0)
         self.lbl_wear = QLabel(
             f'📊 屏幕闪存已上屏 {n} 次' + (f' ≈ 寿命消耗 {n / 10.0:.1f}% (按 10 万次擦写/页 估算)' if n else ''))
-        self.cmb_slot3 = QComboBox()
-        for k, txt in [('cpu_load', 'CPU 负载'), ('gpu_load', 'GPU 负载'),
-                       ('ram', '运行使用率 (内存)'), ('disk', '磁盘占用率')]:
-            self.cmb_slot3.addItem(txt, k)
-        self.cmb_slot3.setCurrentIndex(max(0, self.cmb_slot3.findData(
-            getattr(cfg, 'param_slot3', 'cpu_load'))))
-        self.cmb_slot3.currentIndexChanged.connect(self._slot3_changed)
-        self.cmb_slot3.setToolTip(
-            '参数页第三槽 (百分比槽) 显示的数据源; 前两槽固定为 GPU 温度 / CPU 温度')
-        cv5.addWidget(_setting_row('参数页第三槽', '百分比槽显示的数据源 (前两槽固定 GPU/CPU 温度)', '📺', self.cmb_slot3))
+
         self.lbl_wear.setObjectName('CardHint')
         self.lbl_wear.setWordWrap(True)
         cv5.addWidget(self.lbl_wear)
@@ -1612,10 +1603,7 @@ class ControlPage(QWidget):
         except Exception:
             pass
 
-    def _slot3_changed(self, idx):
-        cfg = self.ctx['cfg']
-        cfg.param_slot3 = self.cmb_slot3.itemData(idx) or 'cpu_load'
-        cfg.save()
+
 
     def _on_upload_count(self, n):
         try:
