@@ -2444,9 +2444,10 @@ class ScreenPage(QWidget):
         import array
         a = array.array('H', data)
         a.byteswap()                         # BE → LE (Qt Format_RGB16 期望小端)
-        img = QImage(bytes(a.tobytes()), SCREEN_W, SCREEN_H, SCREEN_W * 2,
+        buf = a.tobytes()                    # ⚠️ 必须保活到 copy(): QImage 不拷贝数据,
+        img = QImage(buf, SCREEN_W, SCREEN_H, SCREEN_W * 2,   # 临时对象回收 = 悬挂指针 UB
                      QImage.Format_RGB16)
-        return img.copy()                    # 脱离 data 缓冲
+        return img.copy()                    # copy 深拷贝后 buf 才可释放
 
     def _render_preview(self):
         if self._path and self._path.lower().endswith('.bin'):

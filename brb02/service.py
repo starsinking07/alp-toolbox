@@ -326,6 +326,7 @@ class DeviceWorker(QThread):
                 if temp < wall - 3.0:         # 滞回解除
                     self._temp_wall_active = False
                     self._last_sent_rpm = None  # 强制下一 tick 恢复正常控制
+                    self._manual_until = 0.0    # 清手动保持窗, 防 4800 残留 (自检①)
                     from .logbuf import LOGBUF
                     LOGBUF.write(f'[温度墙] 已解除 ({temp:.0f}°C), 恢复正常控制')
                 else:
@@ -1058,6 +1059,8 @@ class DeviceWorker(QThread):
             self._screen_last_key = None        # 新连接: 屏幕内容重新恢复一次 (v3.21)
             self._last_dev_level = None         # 重连后 0x25 基线重建, 防误报按钮换档 (审计 G5)
             self._last_dev_rpm = None
+            self._scene_applied_key = None      # 重连后场景重新评估, 快照作废 (自检②)
+            self._scene_saved = None
             self._connect_ts = time.time()
             try:
                 self.emit_info()
