@@ -577,19 +577,29 @@ class DeviceWorker(QThread):
             return
         LOGBUF.write(f'[屏幕] 开始上传图片: {path} (翻转 H={flip_h} V={flip_v} fit={fit})')
         self._uploading = True
+
+        def _once():
+            try:
+                return self.device.upload_image(
+                    path, heartbeats=self._live_heartbeats(),
+                    progress_cb=lambda s, t: self.uploadProgress.emit(s, t),
+                    cancel_event=self._upload_cancel, flip_h=flip_h, flip_v=flip_v, fit=fit)
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                traceback.print_exc()
+                LOGBUF.write(f'[屏幕] 上传异常: {e}\n{tb}')
+                return {'ok': False, 'reason': f'异常: {e}', 'c6_total': 0, 'c6_bad': 0,
+                        'first_bad': None, 'status_hist': {}, 'c4_ack_ms': 0.0,
+                        'elapsed_ms': 0.0, 'canceled': False, 'sent': 0}
+
         try:
-            res = self.device.upload_image(
-                path, heartbeats=self._live_heartbeats(),
-                progress_cb=lambda s, t: self.uploadProgress.emit(s, t),
-                cancel_event=self._upload_cancel, flip_h=flip_h, flip_v=flip_v, fit=fit)
-        except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            traceback.print_exc()
-            LOGBUF.write(f'[屏幕] 上传异常: {e}\n{tb}')
-            res = {'ok': False, 'reason': f'异常: {e}', 'c6_total': 0, 'c6_bad': 0,
-                   'first_bad': None, 'status_hist': {}, 'c4_ack_ms': 0.0,
-                   'elapsed_ms': 0.0, 'canceled': False, 'sent': 0}
+            res = _once()
+            # 整流重传兜底 (2026-10-06 诊断包案): 页边界 0x0C 级联失败后重传即愈
+            # (8 次上传 4 败, 手动重传全部成功)。只重传 1 次防循环; 取消/握手失败不重传。
+            if not res.get('ok') and not res.get('canceled') and res.get('c6_bad', 0) > 0:
+                LOGBUF.write(f'[屏幕] 首次上传失败 ({res.get("c6_bad", 0)} 非00) —— 自动重传一次')
+                res = _once()
         finally:
             self._uploading = False
             self._upload_cancel.clear()
@@ -781,40 +791,50 @@ class DeviceWorker(QThread):
         kind = want[0]
         LOGBUF.write(f'[屏幕] 自动上屏: {key}')
         self._uploading = True
+
+        def _once():
+            try:
+                if kind == 'info':
+                    img = sc.render_card(
+                        date_str=want[1],
+                        weekday_idx=datetime.datetime.strptime(want[1], '%Y-%m-%d').weekday(),
+                        cpu_model=sc.clean_model_name(self.temps.cpu_name, 'cpu'),
+                        gpu_model=sc.clean_model_name(self.temps.gpu_name, 'gpu'))
+                    data = su.qimage_to_rgb565_be(img)
+                elif kind == 'game':
+                    rpm = int((self._last_status or {}).get('rpm', 0) or 0)
+                    img = sc.render_game(proc=want[1], rpm=rpm, level=self._tec_level)
+                    data = su.qimage_to_rgb565_be(img)
+                elif kind == 'alarm':
+                    img = sc.render_alarm(cpu=want[1], gpu=want[2])
+                    data = su.qimage_to_rgb565_be(img)
+                elif kind == 'custom':
+                    p = want[1]
+                    if not p or not os.path.exists(p):
+                        raise ValueError(f'自定义图片路径无效: {p!r}')
+                    data = su.image_to_rgb565_be(p, fit=getattr(self.config, 'image_fit', 'stretch'))
+                else:                            # want 只可能是以上四种 (防御)
+                    raise ValueError(f'未知上屏类型: {kind!r}')
+                return self.device.upload_canvas(
+                    data, heartbeats=self._live_heartbeats(),
+                    progress_cb=lambda s, t: self.uploadProgress.emit(s, t),
+                    cancel_event=self._screen_cancel, base_ms=7.0)
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                traceback.print_exc()
+                LOGBUF.write(f'[屏幕] 自动上屏异常: {e}\n{tb}')
+                return self.device._upload_fail(f'异常: {e}')
+
         try:
-            if kind == 'info':
-                img = sc.render_card(
-                    date_str=want[1],
-                    weekday_idx=datetime.datetime.strptime(want[1], '%Y-%m-%d').weekday(),
-                    cpu_model=sc.clean_model_name(self.temps.cpu_name, 'cpu'),
-                    gpu_model=sc.clean_model_name(self.temps.gpu_name, 'gpu'))
-                data = su.qimage_to_rgb565_be(img)
-            elif kind == 'game':
-                rpm = int((self._last_status or {}).get('rpm', 0) or 0)
-                img = sc.render_game(proc=want[1], rpm=rpm, level=self._tec_level)
-                data = su.qimage_to_rgb565_be(img)
-            elif kind == 'alarm':
-                img = sc.render_alarm(cpu=want[1], gpu=want[2])
-                data = su.qimage_to_rgb565_be(img)
-            elif kind == 'custom':
-                p = want[1]
-                if not p or not os.path.exists(p):
-                    raise ValueError(f'自定义图片路径无效: {p!r}')
-                data = su.image_to_rgb565_be(p, fit=getattr(self.config, 'image_fit', 'stretch'))
-            else:                                # want 只可能是以上四种 (防御)
-                raise ValueError(f'未知上屏类型: {kind!r}')
-            res = self.device.upload_canvas(
-                data, heartbeats=self._live_heartbeats(),
-                progress_cb=lambda s, t: self.uploadProgress.emit(s, t),
-                cancel_event=self._screen_cancel, base_ms=7.0)
-        except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            traceback.print_exc()
-            LOGBUF.write(f'[屏幕] 自动上屏异常: {e}\n{tb}')
-            res = self.device._upload_fail(f'异常: {e}')
+            res = _once()
+            # 整流重传兜底 (同 _run_image_upload, 2026-10-06 案): 级联非00 重传即愈
+            if not res.get('ok') and not res.get('canceled') and res.get('c6_bad', 0) > 0:
+                LOGBUF.write(f'[屏幕] 首次上屏失败 ({res.get("c6_bad", 0)} 非00) —— 自动重传一次')
+                res = _once()
         finally:
             self._uploading = False
+            self._screen_cancel.clear()   # 取消意图已消化, 不残留给下次自动上屏 (否则恢复卡永久秒取消)
             # 恢复引擎: 强制重发当前转速 + 立即补推 0x07 参数页
             self._last_sent_rpm = None
             self._last_07_ts = 0.0

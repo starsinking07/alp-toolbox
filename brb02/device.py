@@ -311,6 +311,7 @@ class Brb02Device:
 
         t = self._t
         acks = []                                   # (t, cmd, status)
+        c6n = [0]                                   # C6 计数 (页首块门控用; reader 独写, GIL 安全)
         stop = threading.Event()
 
         def reader():
@@ -322,6 +323,8 @@ class Brb02Device:
                     continue
                 if rx[:1] == b'\xa5' and len(rx) >= 5 and rx[1] == 0x05:
                     acks.append((time.time(), rx[2], rx[3]))
+                    if rx[2] == 0xC6:
+                        c6n[0] += 1
 
         th = threading.Thread(target=reader, daemon=True)
         th.start()
@@ -365,6 +368,7 @@ class Brb02Device:
             base = su.ACK_WAIT_MS
             last_w = 0.0
             n_data = 0                        # 进度只数 A4 数据帧 (审计 G22)
+            pauses = set(su.page_pause_after())   # 块 k 之后有 40ms 页停顿 (29 处)
             for n, fr in enumerate(frames[1:], 1):
                 if cancel_event is not None and cancel_event.is_set():
                     canceled = True
@@ -377,6 +381,18 @@ class Brb02Device:
                 since = time.time() - last_w
                 if since < 0.005:
                     time.sleep(0.005 - since)
+                if (n - 1) in pauses:
+                    # 页首块门控 (2026-10-06 诊断包案): 级联失败的首拒块全部精确落在
+                    # 页边界首块 (#1201×3 / #354×1, 与 v3.23 案签名相同 —— 当年判
+                    # "非页边界"系 71 块网格误算): 设备页刷写偶发 >40ms 固定停顿,
+                    # 盲发新页首块即 0x0C 级联到流尾。改为等页末块 C6 到达再发
+                    # (正常早已到达, 零等待); 最多多等 250ms, 超时照发
+                    # (设备深度忙, 由 service 层整流重传兜底)。
+                    gate_until = time.time() + 0.25
+                    while c6n[0] < n - 1 and time.time() < gate_until:
+                        if cancel_event is not None and cancel_event.is_set():
+                            break
+                        time.sleep(0.002)
                 t.write_exact(fr.payload)
                 last_w = time.time()
                 sent = n + 1

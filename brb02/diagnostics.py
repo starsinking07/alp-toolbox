@@ -8,7 +8,7 @@ import zipfile
 from dataclasses import asdict
 from datetime import datetime
 
-APP_VERSION = '0.1.7'
+APP_VERSION = '0.1.8'
 
 
 def export_diagnostics(cfg, worker, log_text: str, out_path: str) -> str:
