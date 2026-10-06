@@ -245,7 +245,7 @@ class SemiGauge(QWidget):
         self.value = None
         self.display_text = '--'
         self.status_word = ''
-        self.color = '#2f6df6'
+        self.color = '#ff4b26' if dark else '#2f6df6'   # 主题 primary (深橙/浅蓝)
         self._anim_value = 0.0
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._animate)
@@ -258,6 +258,17 @@ class SemiGauge(QWidget):
         self.color = color
         if not self._timer.isActive():
             self._timer.start(16)
+
+    def set_color(self, color: str):
+        """只更新强调色并重绘 (主题切换时由 StatusPage 同步调用, 不等下一 tick)。"""
+        self.color = color
+        self.update()
+
+    def set_dark(self, dark: bool):
+        """主题切换: 更新 dark 并重绘 (弧色由 StatusPage._reapply_gauge_colors 同步
+        重刷 —— 此前无 set_dark, 切主题后弧色滞留旧主题 primary 直到下一 tick)。"""
+        self.dark = dark
+        self.update()
 
     def _animate(self):
         target = self.value or 0.0

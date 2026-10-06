@@ -201,6 +201,8 @@ class StatusPage(QWidget):
         gauges.setProperty('card', True)
         g = QGridLayout(gauges)
         g.setContentsMargins(18, 14, 18, 14)
+        self._last_cpu = None
+        self._last_gpu = None                  # 主题切换时重刷仪表色用 (自检③)
         self.gauge_cpu = SemiGauge('CPU 温度', '°C', self.dark, icon_kind='cpu')
         self.gauge_gpu = SemiGauge('GPU 温度', '°C', self.dark, icon_kind='gpu')
         self.gauge_fan = SemiGauge('风扇转速', 'RPM', self.dark, icon_kind='fan')
@@ -303,6 +305,17 @@ class StatusPage(QWidget):
         self.mini_curve.dark = dark          # 风扇速度曲线 (自绘, 颜色随 dark)
         for gw in (self.gauge_cpu, self.gauge_gpu, self.gauge_fan):
             gw.dark = dark
+        self._reapply_gauge_colors()         # 切主题立即重刷三仪表弧色 (自检③, 不等下一 tick)
+
+    def _reapply_gauge_colors(self):
+        """主题切换后立即用当前值重算三仪表颜色 (修复切换瞬间弧色滞留旧主题)。"""
+        from .theme import DARK, LIGHT
+        prim = DARK['primary'] if self.dark else LIGHT['primary']
+        self.gauge_cpu.set_color(temp_color(self._last_cpu, self.dark)
+                                 if self._last_cpu else prim)
+        self.gauge_gpu.set_color(temp_color(self._last_gpu, self.dark)
+                                 if self._last_gpu else prim)
+        self.gauge_fan.set_color(prim)
 
     def sync_smart(self, on: bool):
         self.tgl_smart.blockSignals(True)
@@ -387,6 +400,7 @@ class StatusPage(QWidget):
                                    if fan_est else '平均 --')
 
     def on_temps(self, cpu, gpu):
+        self._last_cpu, self._last_gpu = cpu, gpu
         for gauge, val in ((self.gauge_cpu, cpu), (self.gauge_gpu, gpu)):
             c = temp_color(val, self.dark)
             word = '过热' if val > 85 else ('偏高' if val > 75 else ('正常' if val else ''))
