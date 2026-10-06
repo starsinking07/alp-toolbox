@@ -547,27 +547,55 @@ class DeviceWorker(QThread):
         return target
 
     # ============ 0x07 主机参数推送 (屏幕参数页数据源) ============
-    def _host_info_entries(self, cpu: float, gpu: float):
-        """构造 0x07 的 7 项 (ID, 值) —— 参数页推送与图片上传尾部心跳共用。
-        槽位绑定 (2026-10-03 用户看屏对号): GPU 槽吃 ID01 的值 → ID01=GPU 温度
-        (此前误放 CPU 功耗, GPU 格显示 63=当时 CPU 功耗); ID02=GPU 功耗;
-        ID06 疑 GPU 热点 (cap6 52-54 = GPU 温 +10 量级), 无读数回退 GPU 温;
-        ID03/05 语义未明 (05 官方恒 74 原样回放);
-        ID07 = 当日分钟数 —— 屏幕按 值/60 : 值%60 渲染成 HH:MM (误发 HHMM 会显示
-        PM 33:58 这种超范围时间, 用户实测定案; 官方 1108 = 18:28 吻合)。"""
+    # 参数页 ID 映射 (0.1.8, 官方"参数选项"逆向定案):
+    # 官方 8 项中"风扇转速"是设备本地数据 (0x06), 其余 7 项 = 0x07 的 7 个 ID:
+    # ID00=CPU温 ID01=GPU温 ID02=GPU负载 ID03=磁盘占用率 ID05=运行使用率(内存)
+    # ID06=CPU负载 (2026-10-06 修正: 旧标注"GPU 热点"系误判) ID07=时间
+    PARAM_DEFS = [
+        ('cpu_temp', 0x00), ('gpu_temp', 0x01), ('gpu_load', 0x02),
+        ('disk', 0x03), ('ram', 0x05), ('cpu_load', 0x06), ('time', 0x07),
+    ]
+
+    def _param_value(self, key: str, cpu: float, gpu: float) -> int:
+        """参数选项某项的实时数值 (0~999 整数; 无读数回 0)。"""
         tp = self.temps
-        lt = time.localtime()
-        gt = int(round(gpu)) if gpu and gpu > 1 else 0
-        hs = tp.gpu_hotspot
-        return [
-            (0x00, int(round(cpu)) if cpu and cpu > 1 else 0),
-            (0x01, gt),                                # GPU 温度 (用户对号定案)
-            (0x02, int(round(tp.gpu_power)) if tp.gpu_power else 0),
-            (0x03, 0),
-            (0x05, 74),
-            (0x06, int(round(hs)) if hs else gt),      # 疑热点, 无则回退 GPU 温
-            (0x07, lt.tm_hour * 60 + lt.tm_min),
-        ]
+        if key == 'cpu_temp':
+            return int(round(cpu)) if cpu and cpu > 1 else 0
+        if key == 'gpu_temp':
+            return int(round(gpu)) if gpu and gpu > 1 else 0
+        if key == 'gpu_load':
+            return int(round(tp.gpu_load)) if tp.gpu_load is not None else 0
+        if key == 'cpu_load':
+            return int(round(tp.cpu_load)) if tp.cpu_load is not None else 0
+        if key == 'disk':
+            return int(round(tp.disk_active)) if tp.disk_active is not None else 0
+        if key == 'ram':
+            return int(round(tp._ram_percent() or 0))
+        if key == 'time':
+            lt = time.localtime()
+            return lt.tm_hour * 60 + lt.tm_min
+        return 0
+
+    def _host_info_entries(self, cpu: float, gpu: float):
+        """构造 0x07 的 (ID, 值) 列表 —— 参数页推送与图片上传尾部心跳共用。
+
+        0.1.8 起按 config.param_slots (官方"参数选项") 动态组装: 选中项按顺序推对应
+        ID (官方预览语义"选择先后顺序为屏幕左右顺序"); **slots 为空 = 兼容模式**,
+        推全部 7 项 (与旧版行为一致)。ID 语义 2026-10-06 定案见 PARAM_DEFS
+        (旧版 ID02=GPU 功耗 / ID06=GPU 热点 / ID05 恒 74 均系误判修正)。"""
+        slots = list(getattr(self.config, 'param_slots', []) or [])
+        if not slots:                       # 兼容模式: 官方全 7 项顺序
+            slots = [k for k, _ in self.PARAM_DEFS]
+        id_by_key = dict(self.PARAM_DEFS)
+        out = []
+        for key in slots:
+            sid = id_by_key.get(key)
+            if sid is None:
+                continue
+            out.append((sid, self._param_value(key, cpu, gpu)))
+        if not out:                         # 兜底: 至少推时间
+            out.append((0x07, self._param_value('time', cpu, gpu)))
+        return out
 
     def _push_host_info07(self, cpu: float, gpu: float):
         """屏幕参数页推送 (1Hz), 格式/ID 语义见 protocol.build_host_info。"""

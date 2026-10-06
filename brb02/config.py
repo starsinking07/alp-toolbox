@@ -76,6 +76,10 @@ class Config:
     image_fit: str = 'stretch'          # 'stretch'=拉伸铺满 | 'cover'=等比放大后居中裁边
     # 屏幕写入磨损计数 (0.1.9): 累计成功上屏次数
     screen_upload_count: int = 0
+    # 屏幕参数页选项 (0.1.8, 官方"参数选项"): 选中 key 按顺序推送;
+    # 空 = 兼容模式 (推官方全 7 项)。可选 key:
+    #   cpu_temp gpu_temp cpu_load gpu_load fan_rpm(设备本地) disk ram time
+    param_slots: list = field(default_factory=list)
     # 散热器屏幕内容 (v3.21: 信息卡默认, 自定义图片是用户的选择)
     screen_mode: str = 'card'           # 'card'=信息卡(默认) | 'custom'=自定义图片
     screen_cards: bool = False          # 情境卡片 (v3.32): 默认关, 有需要的人在设置里开

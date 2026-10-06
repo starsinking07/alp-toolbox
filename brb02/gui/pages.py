@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
     QProgressBar, QPushButton, QApplication,
-    QSlider, QSizePolicy, QSpinBox, QStackedWidget,
+    QDialog, QSlider, QSizePolicy, QSpinBox, QStackedWidget,
     QVBoxLayout, QWidget,
 )
 
@@ -1043,6 +1043,67 @@ class CurvePage(QWidget):
 
 
 # ================= 设置页 (控制页) =================
+class ParamOptionsDialog(QDialog):
+    """屏幕参数选项 (0.1.8, 官方同款): 8 项按优先顺序勾选, 实时预览。"""
+
+    def __init__(self, slots: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('参数选项')
+        self._slots = list(slots or [])
+        v = QVBoxLayout(self)
+        v.setSpacing(10)
+        title = QLabel('参数选项')
+        title.setObjectName('PageTitle')
+        title.setAlignment(Qt.AlignCenter)
+        v.addWidget(title)
+
+        self._checks = []
+        for key, name, _ in PARAM_LABELS:
+            cb = QCheckBox(name)
+            cb.setChecked(key in self._slots)
+            cb.toggled.connect(self._reorder)
+            v.addWidget(cb)
+            self._checks.append((key, cb))
+        hint = QLabel('选择先后顺序为屏幕左右顺序')
+        hint.setObjectName('CardHint')
+        hint.setAlignment(Qt.AlignCenter)
+        v.addWidget(hint)
+
+        pv = QLabel()
+        pv.setAlignment(Qt.AlignCenter)
+        self._preview_lbl = pv
+        v.addWidget(pv)
+
+        row = QHBoxLayout()
+        ok = QPushButton('确定')
+        ok.setObjectName('Primary')
+        ok.clicked.connect(self.accept)
+        ca = QPushButton('取消')
+        ca.clicked.connect(self.reject)
+        row.addWidget(ok)
+        row.addWidget(ca)
+        v.addLayout(row)
+        self._render()
+
+    def _reorder(self):
+        """勾选顺序 = 优先顺序 (官方语义): 新勾选的追加到末尾, 取消即移除。"""
+        checked = [k for k, cb in self._checks if cb.isChecked()]
+        kept = [k for k in self._slots if k in checked]      # 保序
+        for k in checked:
+            if k not in kept:
+                kept.append(k)
+        self._slots = kept
+        self._render()
+
+    def _render(self):
+        img = render_param_preview(self._slots)
+        pm = QPixmap.fromImage(img.scaledToWidth(340, Qt.SmoothTransformation))
+        self._preview_lbl.setPixmap(pm)
+
+    def result_slots(self) -> list:
+        return list(self._slots)
+
+
 class ControlPage(QWidget):
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
@@ -1468,6 +1529,10 @@ class ControlPage(QWidget):
         n = int(getattr(cfg, 'screen_upload_count', 0) or 0)
         self.lbl_wear = QLabel(
             f'📊 屏幕闪存已上屏 {n} 次' + (f' ≈ 寿命消耗 {n / 10.0:.1f}% (按 10 万次擦写/页 估算)' if n else ''))
+        btn_param = QPushButton('参数选项…')
+        btn_param.clicked.connect(self._param_options)
+        btn_param.setToolTip('自定义散热器参数页显示的项与顺序 (官方"参数选项"同款)')
+        cv5.addWidget(_setting_row('参数页选项', '自选 8 项参数与左右顺序, 实时推送到散热器屏幕', '📺', btn_param))
         self.lbl_wear.setObjectName('CardHint')
         self.lbl_wear.setWordWrap(True)
         cv5.addWidget(self.lbl_wear)
@@ -1597,6 +1662,13 @@ class ControlPage(QWidget):
                 cfg.save()
         except Exception:
             pass
+
+    def _param_options(self):
+        from PySide6.QtWidgets import QDialog
+        dlg = ParamOptionsDialog(list(getattr(self.ctx['cfg'], 'param_slots', []) or []), self)
+        if dlg.exec() == QDialog.Accepted:
+            self.ctx['cfg'].param_slots = dlg.result_slots()
+            self.ctx['cfg'].save()
 
     def _on_upload_count(self, n):
         try:
@@ -2200,6 +2272,53 @@ IMG_EXTS = ('.png', '.jpg', '.jpeg', '.bmp', '.webp')   # 拖入白名单 (与 I
 
 _FIT_STRETCH = '拉伸铺满 (不裁边; 比例不符会轻微形变)'
 _FIT_COVER = '等比裁边 (不形变; 居中裁掉超出部分)'
+
+
+# 参数选项 (0.1.8, 官方"参数选项"同款): key → (显示标签, 槽位值样式)
+PARAM_LABELS = [
+    ('cpu_temp', 'CPU 温度', 'CPU ℃'),
+    ('gpu_temp', 'GPU 温度', 'GPU ℃'),
+    ('cpu_load', 'CPU 负载', 'CPU /%'),
+    ('gpu_load', 'GPU 负载', 'GPU /%'),
+    ('fan_rpm',  '风扇转速', 'RPM'),
+    ('disk',     '磁盘占用率', 'DSK /%'),
+    ('ram',      '运行使用率', 'RAM /%'),
+    ('time',     '时间', 'PM'),
+]
+
+
+def render_param_preview(slots: list) -> QImage:
+    """参数页效果预览 (0.1.8): 黑底 428×142, 左上 FAN LV, 三槽按选中顺序渲染
+    (官方语义"选择先后顺序为屏幕左右顺序", 取前 3 项), 右下 USB 图标。"""
+    W, H = SCREEN_W, SCREEN_H
+    img = QImage(W, H, QImage.Format_RGB32)
+    img.fill(QColor('#0b1020'))                      # 深蓝黑底 (贴近设备实机)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing)
+    mono = QFont('Segoe UI', 10)                 # 预览用系统字体 (GeistMono 打包在 exe, 预览不依赖)
+    big = QFont('Segoe UI', 30)
+    big.setBold(True)
+    p.setPen(QColor('#e8eef7'))
+    p.setFont(mono)
+    p.drawText(16, 30, 'FAN LV 1')                    # 左上: 档位 (设备本地)
+    p.setPen(QColor('#57c2ff'))
+    p.drawText(W - 46, 34, '⏚')                       # 右上: USB 简符
+    labels = {k: lbl for k, lbl, _ in PARAM_LABELS}
+    slots3 = [s for s in (slots or []) if s] [:3]
+    x_slots = [W * 0.06, W * 0.40, W * 0.72]
+    for i, key in enumerate(slots3):
+        x = int(x_slots[i])
+        p.setPen(QColor('#8fa3bd'))
+        p.setFont(mono)
+        p.drawText(x, H - 34, labels.get(key, key))
+        p.setPen(QColor('#ffffff'))
+        p.setFont(big)
+        demo = '10:08' if key == 'time' else '100'
+        if key == 'fan_rpm':
+            demo = '1600'
+        p.drawText(x, H - 8, demo)
+    p.end()
+    return img
 
 
 def fit_image(img: QImage, fit: str) -> QImage:

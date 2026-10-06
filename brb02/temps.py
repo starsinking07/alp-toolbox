@@ -49,6 +49,11 @@ class TempReader:
         self.cpu_power: float | None = None    # W
         self.gpu_power: float | None = None    # W
         self.cpu_ok = False
+        # 负载体 (0.1.8 参数页): CPU/GPU 负载% / 内存占用% / 磁盘活动%
+        self.cpu_load: float | None = None
+        self.gpu_load: float | None = None
+        self.ram_used: float | None = None
+        self.disk_active: float | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._t: Optional[threading.Thread] = None
@@ -95,6 +100,11 @@ class TempReader:
         computer = Hardware.Computer()
         computer.IsCpuEnabled = True
         computer.IsGpuEnabled = True
+        try:                                  # 参数页 (0.1.8): 内存占用 + 磁盘活动
+            computer.IsMemoryEnabled = True
+            computer.IsStorageEnabled = True
+        except Exception:
+            pass
         computer.Open()
 
         while not self._stop.is_set():
@@ -141,6 +151,8 @@ class TempReader:
                     gpu_name = ''
                 # CPU 功耗单独扫
                 cpu_p = self._scan_cpu_power(computer)
+                # 负载体扫描 (0.1.8): CPU/GPU 负载 + 内存 + 磁盘
+                cpu_l, gpu_l, ram_u, disk_a = self._scan_extra(computer)
             except Exception:
                 import traceback
                 traceback.print_exc()
@@ -152,6 +164,8 @@ class TempReader:
                     self.cpu_name = cpu_name
                 if gpu_name:
                     self.gpu_name = gpu_name
+                self.cpu_load, self.gpu_load = cpu_l, gpu_l
+                self.ram_used, self.disk_active = ram_u, disk_a
                 self.cpu_power = cpu_p
                 self.gpu_power = gpu_p
             self._stop.wait(self.interval)
@@ -206,6 +220,68 @@ class TempReader:
             if power is None:
                 power = p2
         return temp, hotspot, power
+
+    def _scan_extra(self, computer):
+        """负载体 (0.1.8 参数页): 返回 (CPU负载%, GPU负载%, 内存占用%, 磁盘活动%)。
+        任一项读不到为 None。LHM SensorType: Load / Data。"""
+        cpu_l = gpu_l = ram_u = disk_a = None
+        for hw in computer.Hardware:
+            ht = str(hw.HardwareType)
+            if 'Cpu' in ht:
+                for s in hw.Sensors:
+                    if str(s.SensorType) == 'Load' and s.Value is not None:
+                        n = str(s.Name).lower()
+                        if n in ('cpu total', 'total', 'core #1 - total') or 'total' in n:
+                            try:
+                                cpu_l = float(s.Value)
+                            except (TypeError, ValueError):
+                                pass
+            elif 'Gpu' in ht:
+                for s in hw.Sensors:
+                    if str(s.SensorType) == 'Load' and s.Value is not None:
+                        n = str(s.Name).lower()
+                        if 'core' in n or 'gpu total' in n or n == 'load':
+                            try:
+                                v = float(s.Value)
+                                gpu_l = v if gpu_l is None else max(gpu_l, v)
+                            except (TypeError, ValueError):
+                                pass
+            elif 'Storage' in ht:
+                for s in hw.Sensors:
+                    if str(s.SensorType) == 'Load' and s.Value is not None:
+                        try:
+                            v = float(s.Value)
+                            disk_a = v if disk_a is None else max(disk_a, v)
+                        except (TypeError, ValueError):
+                            pass
+        return cpu_l, gpu_l, ram_u, disk_a
+
+    @staticmethod
+    def _ram_percent() -> float | None:
+        """内存占用% (ctypes GlobalMemoryStatusEx, 零依赖)。"""
+        import ctypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong),
+                        ('ullTotalPhys', ctypes.c_ulonglong), ('ullAvailPhys', ctypes.c_ulonglong),
+                        ('ullTotalPageFile', ctypes.c_ulonglong), ('ullAvailPageFile', ctypes.c_ulonglong),
+                        ('ullTotalVirtual', ctypes.c_ulonglong), ('ullAvailVirtual', ctypes.c_ulonglong),
+                        ('ullAvailExtendedVirtual', ctypes.c_ulonglong)]
+        try:
+            st = MEMORYSTATUSEX()
+            st.dwLength = ctypes.sizeof(st)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return float(st.dwMemoryLoad)
+        except Exception:
+            pass
+        return None
+
+    def load_snapshot(self) -> dict:
+        """负载体快照 (0.1.8 参数页): {'cpu_load','gpu_load','ram','disk'}, 无读数为 None。
+        内存走 GlobalMemoryStatusEx (零依赖); CPU/GPU 负载与磁盘活动走 LHM (需管理员)。"""
+        with self._lock:
+            return {'cpu_load': self.cpu_load, 'gpu_load': self.gpu_load,
+                    'ram': self._ram_percent(), 'disk': self.disk_active}
 
     def _scan_cpu_power(self, computer) -> float | None:
         for hw in computer.Hardware:
