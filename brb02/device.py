@@ -268,6 +268,17 @@ class Brb02Device:
         from . import screen_upload as su
         if self._t is None:
             return self._upload_fail('设备未连接')
+        if path.lower().endswith('.bin'):
+            # 官方缓存画布直传 (0.1.9 历史图片): bin 即 121,552B RGB565BE 画布, 免解码
+            try:
+                data = open(path, 'rb').read()
+            except Exception as e:
+                return self._upload_fail(f'画布文件读取失败: {e}')
+            if len(data) != su.CANVAS_BYTES:
+                return self._upload_fail(f'画布长度必须 {su.CANVAS_BYTES}, 实际 {len(data)}')
+            return self.upload_canvas(data, heartbeats=heartbeats, progress_cb=progress_cb,
+                                      cancel_event=cancel_event, flip_h=flip_h,
+                                      flip_v=flip_v, base_ms=base_ms)
         try:
             data = su.image_to_rgb565_be(path, fit=fit)
         except Exception as e:

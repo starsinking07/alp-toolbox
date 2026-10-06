@@ -9,12 +9,13 @@ import sys
 import tempfile
 import time
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QIcon
 from PySide6.QtWidgets import QGraphicsOpacityEffect
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPlainTextEdit, QProgressBar, QPushButton, QApplication,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
+    QProgressBar, QPushButton, QApplication,
     QSlider, QSizePolicy, QSpinBox, QStackedWidget,
     QVBoxLayout, QWidget,
 )
@@ -1243,6 +1244,24 @@ class ControlPage(QWidget):
         self.tgl_spike.toggled = self._spike_changed
         self.row_spike = _setting_row('温度尖峰过滤', '忽略单次异常跳温, 避免误触发控制', '🛡️', self.tgl_spike)
         cv2.addWidget(self.row_spike)
+        # 温度墙 (0.1.9): 过热保护, 优先级高于一切控制
+        self.tgl_wall = Toggle(cfg.temp_wall_enabled)
+        self.tgl_wall.toggled = self._wall_toggled
+        wall_w = QWidget()
+        wh = QHBoxLayout(wall_w)
+        wh.setContentsMargins(0, 0, 0, 0)
+        wh.setSpacing(6)
+        self.spin_wall = QSpinBox()
+        self.spin_wall.setRange(70, 100)
+        self.spin_wall.setSuffix('°C')
+        self.spin_wall.setFixedWidth(76)
+        self.spin_wall.setAlignment(Qt.AlignCenter)
+        self.spin_wall.setValue(int(cfg.temp_wall_temp))
+        self.spin_wall.valueChanged.connect(self._wall_temp_changed)
+        wh.addWidget(self.spin_wall)
+        wall_w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.row_wall = _setting_row('温度墙保护', '过热时无视一切设置强制拉满, 降温 3°C 解除', '🧱', wall_w)
+        cv2.addWidget(self.row_wall)
         self._sync_setting_deps()
         self.tgl_restore = Toggle(cfg.restore_on_start)
         self.tgl_restore.toggled = self._restore_toggled
@@ -1254,6 +1273,72 @@ class ControlPage(QWidget):
         self.tgl_autoswitch.toggled = self._autoswitch_changed
         cv2.addWidget(_setting_row('USB / 蓝牙自动切换', '拔线自动切蓝牙, 插线自动切回 USB', '🔀', self.tgl_autoswitch))
         fv.addWidget(card2)
+
+        # --- 情景配置 (0.1.9, 官方"情景"同款+曲线维度) ---
+        card_s, _, cvs = _card(
+            '情景配置',
+            '前台进程命中进程子串时自动应用该配置 (转速 / 曲线方案 / 灯效模式), '
+            '离开后自动恢复。留空或填 0 表示"该项不变"。')
+        self.tgl_scene = Toggle(cfg.scene_enabled)
+        self.tgl_scene.toggled = self._scene_toggled
+        cvs.addWidget(_setting_row('启用情景联动', '按前台进程自动切换风扇/灯效配置', '🎯', self.tgl_scene))
+        self.scene_edits = []
+        from ..protocol import (RGB_MODE_FLOW, RGB_MODE_CYCLE, RGB_MODE_BREATH,
+                                RGB_MODE_STEADY, RGB_MODE_BLINK, RGB_MODE_REACTIVE,
+                                RGB_MODE_REFRESH)
+        light_opts = [('(灯效不变)', -1), ('流动', RGB_MODE_FLOW), ('彩色循环', RGB_MODE_CYCLE),
+                      ('呼吸', RGB_MODE_BREATH), ('常亮', RGB_MODE_STEADY), ('闪烁', RGB_MODE_BLINK),
+                      ('响应', RGB_MODE_REACTIVE), ('刷新', RGB_MODE_REFRESH)]
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        headers = ['配置', '启用', '进程子串 (逗号分隔)', '固定转速', '曲线方案', '灯效模式']
+        for col, h in enumerate(headers):
+            cap = QLabel(h)
+            cap.setObjectName('StatVal')
+            grid.addWidget(cap, 0, col)
+        scheme_names = ['(方案不变)'] + list((cfg.curve_profiles or {}).keys())
+        light_pairs = dict(light_opts)
+        for row_i, prof in enumerate(cfg.scene_profiles or []):
+            lab = QLabel(prof.get('name', f'配置{chr(65 + row_i)}'))
+            grid.addWidget(lab, row_i + 1, 0)
+            tg = Toggle(prof.get('enabled', False))
+            tg.toggled = (lambda on, i=row_i: self._scene_prof_changed(i, 'enabled', on))
+            wrap = QWidget(); wl = QHBoxLayout(wrap); wl.setContentsMargins(0, 0, 0, 0)
+            wl.addWidget(tg); wrap.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            grid.addWidget(wrap, row_i + 1, 1)
+            procs = QLineEdit(', '.join(prof.get('processes') or []))
+            procs.setPlaceholderText('如: cyberpunk, steam')
+            procs.setMinimumWidth(150)
+            procs.textChanged.connect(lambda txt, i=row_i: self._scene_prof_changed(
+                i, 'processes', [s.strip() for s in txt.split(',') if s.strip()]))
+            grid.addWidget(procs, row_i + 1, 2)
+            sp = QSpinBox()
+            sp.setRange(0, 4800)
+            sp.setSpecialValueText('不变')
+            sp.setFixedWidth(74)
+            sp.setAlignment(Qt.AlignCenter)
+            sp.setValue(int(prof.get('rpm', 0) or 0))
+            sp.valueChanged.connect(lambda v, i=row_i: self._scene_prof_changed(i, 'rpm', int(v)))
+            grid.addWidget(sp, row_i + 1, 3)
+            cb_scheme = QComboBox()
+            cb_scheme.addItem('(方案不变)', '')
+            for nm in (cfg.curve_profiles or {}):
+                cb_scheme.addItem(nm, nm)
+            cb_scheme.setCurrentIndex(max(0, cb_scheme.findData(prof.get('scheme', ''))))
+            cb_scheme.currentIndexChanged.connect(
+                lambda idx, c=cb_scheme, i=row_i: self._scene_prof_changed(i, 'scheme', c.itemData(idx)))
+            grid.addWidget(cb_scheme, row_i + 1, 4)
+            cb_light = QComboBox()
+            for txt, val in light_opts:
+                cb_light.addItem(txt, int(val))
+            cb_light.setCurrentIndex(max(0, cb_light.findData(int(prof.get('light_mode', -1)))))
+            cb_light.currentIndexChanged.connect(
+                lambda idx, c=cb_light, i=row_i: self._scene_prof_changed(i, 'light_mode', int(c.itemData(idx))))
+            grid.addWidget(cb_light, row_i + 1, 5)
+            self.scene_edits.append((tg, procs, sp, cb_scheme, cb_light))
+        cvs.addLayout(grid)
+        fv.addWidget(card_s)
         fv.addStretch(1)
 
         # --- 灯效 ---
@@ -1380,6 +1465,16 @@ class ControlPage(QWidget):
         tip.setObjectName('CardHint')
         tip.setWordWrap(True)
         cv5.addWidget(tip)
+        n = int(getattr(cfg, 'screen_upload_count', 0) or 0)
+        self.lbl_wear = QLabel(
+            f'📊 屏幕闪存已上屏 {n} 次' + (f' ≈ 寿命消耗 {n / 10.0:.1f}% (按 10 万次擦写/页 估算)' if n else ''))
+        self.lbl_wear.setObjectName('CardHint')
+        self.lbl_wear.setWordWrap(True)
+        cv5.addWidget(self.lbl_wear)
+        try:
+            self.ctx['worker'].uploadCountChanged.connect(self._on_upload_count)
+        except Exception:
+            pass
         hv.addWidget(card5)
         hv.addStretch(1)
 
@@ -1487,6 +1582,36 @@ class ControlPage(QWidget):
 
     def _spike_changed(self, on):
         self.ctx['cfg'].spike_filter = on
+        self.ctx['cfg'].save()
+
+    def _scene_toggled(self, on):
+        self.ctx['cfg'].scene_enabled = bool(on)
+        self.ctx['cfg'].save()
+
+    def _scene_prof_changed(self, i: int, field: str, val):
+        cfg = self.ctx['cfg']
+        try:
+            profs = cfg.scene_profiles
+            if 0 <= i < len(profs) and isinstance(profs[i], dict):
+                profs[i][field] = val
+                cfg.save()
+        except Exception:
+            pass
+
+    def _on_upload_count(self, n):
+        try:
+            self.lbl_wear.setText(
+                f'📊 屏幕闪存已上屏 {int(n)} 次' +
+                (f' ≈ 寿命消耗 {int(n) / 10.0:.1f}% (按 10 万次擦写/页 估算)' if n else ''))
+        except Exception:
+            pass
+
+    def _wall_toggled(self, on):
+        self.ctx['cfg'].temp_wall_enabled = bool(on)
+        self.ctx['cfg'].save()
+
+    def _wall_temp_changed(self, v):
+        self.ctx['cfg'].temp_wall_temp = float(v)
         self.ctx['cfg'].save()
 
     def _restore_toggled(self, on):
@@ -2175,6 +2300,33 @@ class ScreenPage(QWidget):
         self.result.setWordWrap(True)
         cv.addWidget(self.result)
         v.addWidget(card)
+
+        # --- 官方历史图片 (0.1.9): 读官方软件的画布缓存, 零转换直传 ---
+        self.hist_list = None
+        hist_bins = self._scan_history_bins()
+        if hist_bins:
+            card2, _, hv2 = _card(
+                '历史图片',
+                '官方软件 (黑鲨装备箱) 缓存过的屏幕图片, 点击选中后直接上传 (格式互认, 零转换)。')
+            self.hist_list = QListWidget()
+            self.hist_list.setViewMode(QListWidget.IconMode)
+            self.hist_list.setIconSize(QSize(128, 42))
+            self.hist_list.setResizeMode(QListWidget.Adjust)
+            self.hist_list.setSpacing(8)
+            self.hist_list.setFixedHeight(96)
+            self.hist_list.itemClicked.connect(self._hist_clicked)
+            for path, ts in hist_bins:
+                img = self._load_canvas_bin(path)
+                if img.isNull():
+                    continue
+                import datetime
+                when = datetime.datetime.fromtimestamp(ts).strftime('%m-%d %H:%M')
+                item = QListWidgetItem(QIcon(QPixmap.fromImage(img)), when)
+                item.setData(Qt.UserRole, path)
+                item.setToolTip(os.path.basename(path) + '  ' + when)
+                self.hist_list.addItem(item)
+            hv2.addWidget(self.hist_list)
+            v.addWidget(card2)
         v.addStretch(1)
 
         w = ctx['worker']
@@ -2205,6 +2357,32 @@ class ScreenPage(QWidget):
                 pass
         self._sync_buttons()
 
+    @staticmethod
+    def _scan_history_bins():
+        """官方画布缓存目录 → [(path, mtime)] 按时间倒序 (无目录返回空)。"""
+        d = r'C:\ProgramData\BlackSharkEquipmentBox\Brb02Image'
+        try:
+            if not os.path.isdir(d):
+                return []
+            out = []
+            for name in os.listdir(d):
+                if name.lower().endswith('.bin'):
+                    p = os.path.join(d, name)
+                    try:
+                        if os.path.getsize(p) == SCREEN_W * SCREEN_H * 2:
+                            out.append((p, os.path.getmtime(p)))
+                    except OSError:
+                        pass
+            out.sort(key=lambda x: -x[1])
+            return out[:24]                  # 最多 24 张 (UI 密度)
+        except Exception:
+            return []
+
+    def _hist_clicked(self, item):
+        path = item.data(Qt.UserRole)
+        if path:
+            self._set_path(path)             # .bin 直传通道, fit 无效但预览原样
+
     def _pick(self):
         from PySide6.QtWidgets import QFileDialog
         start = os.path.dirname(self._path) if self._path else ''
@@ -2232,8 +2410,23 @@ class ScreenPage(QWidget):
                     return
 
     # ---- 预览 ----
+    @staticmethod
+    def _load_canvas_bin(path: str) -> QImage:
+        """官方缓存画布 (121,552B RGB565BE) → QImage (0.1.9 历史图片)。"""
+        try:
+            data = open(path, 'rb').read()
+        except Exception:
+            return QImage()
+        if len(data) != SCREEN_W * SCREEN_H * 2:
+            return QImage()
+        img = QImage(data, SCREEN_W, SCREEN_H, SCREEN_W * 2, QImage.Format_RGB16)
+        return img.copy()                    # 脱离 data 缓冲
+
     def _render_preview(self):
-        img = QImage(self._path) if self._path else QImage()
+        if self._path and self._path.lower().endswith('.bin'):
+            img = self._load_canvas_bin(self._path)
+        else:
+            img = QImage(self._path) if self._path else QImage()
         self._img_valid = not img.isNull()   # 解码失败 → 置无效, _sync_buttons 据此禁上传
         if img.isNull():
             self.preview.setPixmap(QPixmap())

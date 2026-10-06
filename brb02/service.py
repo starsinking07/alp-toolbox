@@ -28,6 +28,22 @@ _kernel32 = ctypes.windll.kernel32
 _psapi = ctypes.windll.psapi
 
 
+def match_scene_profile(profiles: list, proc: str):
+    """场景匹配纯函数: 返回 (index, profile) 或 (None, None)。
+    只看 enabled 且 processes 非空的槽; 子串大小写不敏感; 空子串跳过 (防命中一切)。"""
+    pl = (proc or '').lower()
+    if not pl:
+        return None, None
+    for i, p in enumerate(profiles or []):
+        if not isinstance(p, dict) or not p.get('enabled'):
+            continue
+        for sub in (p.get('processes') or []):
+            s = (sub or '').strip().lower()
+            if s and s in pl:
+                return i, p
+    return None, None
+
+
 def foreground_process() -> str:
     try:
         hwnd = _user32.GetForegroundWindow()
@@ -60,6 +76,7 @@ class DeviceWorker(QThread):
     historyChanged = Signal()
     uploadProgress = Signal(int, int)      # 屏幕上传进度 (已发数据帧, 总 2096)
     uploadFinished = Signal(dict)          # 上传结束 (结果 dict, 见 device.upload_canvas)
+    uploadCountChanged = Signal(int)       # 磨损计数变化 (累计成功上屏次数, 0.1.9)
     deviceGearChanged = Signal(int, int)   # 散热器实体按钮换档 (level, rpm) — 0x25 轮询检测
 
     def __init__(self, config: Config, parent=None):
@@ -84,6 +101,9 @@ class DeviceWorker(QThread):
         self._last_sent_rpm: int | None = None
         self._last_send_ts = 0.0
         self._last_scene_key = None
+        self._temp_wall_active = False        # 温度墙激活态 (0.1.9)
+        self._scene_applied_key = None        # 场景应用态 (('p',idx)/('none',proc))
+        self._scene_saved = None              # 进入场景前快照 (0.1.9)
         self._scene_rpm_applied = False     # 情景转速已下发 (规则清空后需恢复, 审计 G11)
         # 温度处理链状态
         self._temp_state = {}    # 每通道 (cpu/gpu) 独立的 EMA/尖峰状态
@@ -298,6 +318,25 @@ class DeviceWorker(QThread):
         if temp is None or temp <= 1:
             return
         self._tec_tick(temp, now)   # 档位自动切换 (功能 #10)
+
+        # --- 温度墙 (0.1.9): 过热保护, 优先级高于一切 (含智能启停) ---
+        if cfg.temp_wall_enabled:
+            wall = float(cfg.temp_wall_temp)
+            if self._temp_wall_active:
+                if temp < wall - 3.0:         # 滞回解除
+                    self._temp_wall_active = False
+                    self._last_sent_rpm = None  # 强制下一 tick 恢复正常控制
+                    from .logbuf import LOGBUF
+                    LOGBUF.write(f'[温度墙] 已解除 ({temp:.0f}°C), 恢复正常控制')
+                else:
+                    self._apply_target(4800, now, 'tempwall')
+                    return
+            elif temp >= wall:
+                self._temp_wall_active = True
+                from .logbuf import LOGBUF
+                LOGBUF.write(f'[温度墙] 触发 ({temp:.0f}°C ≥ {wall:.0f}°C), 拉满 4800 RPM')
+                self._apply_target(4800, now, 'tempwall')
+                return
 
         # --- 智能启停 (功能 #1): 迟滞门, 优先级最高 ---
         if cfg.start_stop_enabled:
@@ -613,6 +652,11 @@ class DeviceWorker(QThread):
         if res.get('ok') and not res.get('canceled'):
             # 用户手动上传成功 → 切到自定义图片模式并持久化 (信息卡不再自动覆盖)
             self.config.screen_mode = 'custom'
+            try:                                    # 磨损计数 (0.1.9)
+                self.config.screen_upload_count = int(getattr(self.config, 'screen_upload_count', 0)) + 1
+                self.uploadCountChanged.emit(self.config.screen_upload_count)
+            except Exception:
+                pass
             self.config.save()
         self.uploadFinished.emit(res)
 
@@ -843,6 +887,13 @@ class DeviceWorker(QThread):
         if res.get('ok'):
             self._screen_last_key = key          # 成功才记账 (失败冷却后重试)
             self._screen_last_upload_ts = time.time()   # 成功后记账磨损预算 (审计 G19)
+            try:                                        # 磨损计数 (0.1.9): 累计成功上屏次数
+                cfg = self.config
+                cfg.screen_upload_count = int(getattr(cfg, 'screen_upload_count', 0)) + 1
+                cfg.save()
+                self.uploadCountChanged.emit(cfg.screen_upload_count)
+            except Exception:
+                pass
         elif not res.get('canceled'):
             self._screen_fail_until = time.time() + 600   # 10min 冷却后自动重传治愈残图
         self.last_upload_kind = 'screen'
@@ -900,38 +951,85 @@ class DeviceWorker(QThread):
 
     # ============ 情景联动 ============
     def _scene_tick(self):
+        """场景配置 (0.1.9): 前台进程命中 profile → 应用 [固定转速/曲线方案/灯效模式];
+        离开场景 → 恢复进入前快照。修复旧版"离开有规则进程后 RPM 残留" (P2)。"""
         proc = foreground_process()
         if not proc:
             return
-        rule = None
-        for r in self.config.scene_rules:
-            match = (r.get('match') or '').lower()
-            if not match:
-                continue                     # 空 match 子串会命中一切进程 (审计 G11)
-            if match in proc:
-                rule = r
-                break
-        key = (proc, rule.get('rpm') if rule else None)
-        if key == self._last_scene_key:
+        idx, prof = match_scene_profile(getattr(self.config, 'scene_profiles', []) or [], proc)
+        key = ('p', idx) if prof else ('none', proc)
+        if key == self._scene_applied_key:
             return
-        self._last_scene_key = key
-        if rule:
-            rpm = int(rule.get('rpm', 0))
+        prev = self._scene_applied_key
+        self._scene_applied_key = key
+        if prof:
+            if prev is None or prev[0] != 'p':
+                self._scene_snapshot()       # 进入第一个场景前快照 (A→B 不重复快照)
+            self._apply_scene_profile(prof)
+        elif prev is not None and prev[0] == 'p':
+            self._restore_scene()            # 离开场景 → 恢复快照 (P2 修复)
+
+    def _scene_snapshot(self):
+        """记录进入场景前的状态 (曲线方案 + 灯效参数), 供离开时恢复。"""
+        cfg = self.config
+        self._scene_saved = {
+            'curve_active': cfg.curve_active,
+            'curve': [list(x) for x in (cfg.curve or [])],
+        }
+        try:
+            r = self.device._send(pc.get_cur_rgb())
+            for cmd, data in r:
+                if cmd == 0x13 and len(data) >= 9:
+                    eff = pc.parse_rgb_effect(data)
+                    if eff:
+                        self._scene_saved['rgb'] = eff.get('cfg', b'') + bytes(
+                            [eff['mode'] & 0xFF]) + eff['cfg'][5:8] + bytes([eff['extra']])
+        except Exception:
+            pass                              # 读不到灯效就不恢复灯效 (rpm/曲线照常)
+
+    def _apply_scene_profile(self, prof: dict):
+        from .logbuf import LOGBUF
+        try:
+            rpm = int(prof.get('rpm', 0) or 0)
             if rpm > 0:
                 self.device.set_fixed_rpm(rpm)
                 self._last_sent_rpm = rpm
-                self._scene_rpm_applied = True
+                self._last_host_0x24_ts = time.time()
                 self._manual_until = time.time() + 10
-        elif not self.config.scene_rules and self._scene_rpm_applied:
-            # 规则集被清空: 恢复配置固定转速, 防情景转速永久残留 (审计 G11)
-            self._scene_rpm_applied = False
-            try:
-                self.device.set_fixed_rpm(self.config.fixed_rpm)
-                self._last_sent_rpm = self.config.fixed_rpm
-                self._last_host_0x24_ts = time.time()   # 主机直发, 防 0x25 误判成按钮
-            except Exception as e:
-                from .logbuf import LOGBUF
-                LOGBUF.write(f'[情景] 恢复固定转速失败: {e}')
+            scheme = prof.get('scheme') or ''
+            if scheme and scheme in (self.config.curve_profiles or {}):
+                self.config.curve_active = scheme
+                self.config.curve = [list(x) for x in self.config.curve_profiles[scheme]]
+                self.config.save()
+                self._last_sent_rpm = None    # 引擎下 tick 按新曲线重发
+            lm = prof.get('light_mode', -1)
+            if lm is not None and int(lm) >= 0:
+                saved = self._scene_saved or {}
+                base = saved.get('rgb')
+                if base and len(base) >= 9:
+                    # 原参数只换模式位 (base = cfg5 + mode + rgb3 + extra)
+                    params = bytes(base[:5]) + bytes([int(lm) & 0xFF]) + base[6:9]
+                    self.device._send(pc.build_frame(0x12, params))
+            LOGBUF.write(f"[场景] 应用 {prof.get('name', '?')} "
+                         f"(rpm={rpm or '-'} 方案={scheme or '-'} 灯效={lm})")
+        except Exception as e:
+            LOGBUF.write(f'[场景] 应用失败: {e}')
+
+    def _restore_scene(self):
+        from .logbuf import LOGBUF
+        saved = self._scene_saved or {}
+        try:
+            if 'curve_active' in saved:
+                self.config.curve_active = saved['curve_active']
+                self.config.curve = [list(x) for x in saved['curve']]
+                self.config.save()
+            if 'rgb' in saved:
+                self.device._send(pc.build_frame(0x12, saved['rgb'][:9]))
+            self._last_sent_rpm = None        # 引擎下 tick 恢复固定转速/曲线
+            self._scene_saved = None
+            LOGBUF.write('[场景] 已恢复进入前状态')
+        except Exception as e:
+            LOGBUF.write(f'[场景] 恢复失败: {e}')
 
     # ============ 连接 ============
     def _connect(self) -> bool:

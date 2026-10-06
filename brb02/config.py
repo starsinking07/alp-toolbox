@@ -56,17 +56,26 @@ class Config:
     learning_offsets: list = field(default_factory=list)   # 每锚点偏移(%), 与19锚点对齐
     # 温升预判
     prediction_enabled: bool = False
+    # 温度墙 (0.1.9): 过热保护, 优先级高于一切控制 (含智能启停)
+    temp_wall_enabled: bool = True
+    temp_wall_temp: float = 92.0        # 触发温度°C, 降 3°C 滞回解除
     # RGB
     rgb_on: bool = True
     gear_light: bool = False            # 挡位灯联动 (依赖 RGB 写入逆向)
     # 情景
     scene_enabled: bool = False
-    scene_rules: list = field(default_factory=list)
+    scene_rules: list = field(default_factory=list)   # (旧版遗留, 已由 scene_profiles 取代)
+    # 场景配置 (0.1.9, 官方"情景"同款+增强): 4 槽 × [固定转速/曲线方案/灯效模式 + 进程子串]
+    # 每项: {'name': str, 'enabled': bool, 'rpm': int(0=不改), 'scheme': str(''=不改),
+    #        'light_mode': int(-1=不改, RGB_MODE_*), 'processes': [前台进程子串,...]}
+    scene_profiles: list = field(default_factory=list)
     # 快捷键
     hotkeys_enabled: bool = True
     # 屏幕图片页
     last_image_path: str = ''           # 记住上次选择的图片
     image_fit: str = 'stretch'          # 'stretch'=拉伸铺满 | 'cover'=等比放大后居中裁边
+    # 屏幕写入磨损计数 (0.1.9): 累计成功上屏次数
+    screen_upload_count: int = 0
     # 散热器屏幕内容 (v3.21: 信息卡默认, 自定义图片是用户的选择)
     screen_mode: str = 'card'           # 'card'=信息卡(默认) | 'custom'=自定义图片
     screen_cards: bool = False          # 情境卡片 (v3.32): 默认关, 有需要的人在设置里开
@@ -168,6 +177,22 @@ class Config:
             self.learning_offsets = []
         if not isinstance(self.scene_rules, list):
             self.scene_rules = []
+        if not isinstance(self.scene_profiles, list):
+            self.scene_profiles = []
+        while len(self.scene_profiles) < 4:          # 固定 4 槽 (官方同款 配置A-D)
+            self.scene_profiles.append({
+                'name': f'配置{chr(65 + len(self.scene_profiles))}',
+                'enabled': False, 'rpm': 0, 'scheme': '', 'light_mode': -1,
+                'processes': []})
+        del self.scene_profiles[4:]
+        if not isinstance(self.scene_profiles, list):
+            self.scene_profiles = []
+        while len(self.scene_profiles) < 4:          # 固定 4 槽 (官方同款 配置A-D)
+            self.scene_profiles.append({
+                'name': f'配置{chr(65 + len(self.scene_profiles))}',
+                'enabled': False, 'rpm': 0, 'scheme': '', 'light_mode': -1,
+                'processes': []})
+        del self.scene_profiles[4:]
         if not isinstance(self.presets, dict):
             self.presets = {}
         if self.conn_type not in ('usb', 'ble'):
