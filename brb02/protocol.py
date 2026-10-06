@@ -93,8 +93,12 @@ def get_rgb_switch() -> bytes:
 
 
 def get_cur_cooling() -> bytes:
-    """实测: -> [A5][09][25][00][00][01][rpm16][pct]"""
-    return bytes([HEADER, 0x03, 0x25, checksum(bytes([HEADER, 0x03, 0x25]))])
+    """读当前制冷状态。⚠️ 2026-10-06 定案: 请求形态决定应答形态 ——
+    LEN=3 短形态 → 15B 全量应答 ([mode][x][on]+4 锚点曲线+[pct], **无 rpm 字段**);
+    LEN=4 (`A5 04 25 CE`) → 6B 简版应答 [mode][x][on][rpm16][pct] (本工具箱使用)。
+    用短形态会把曲线锚点字节误读成 rpm (45076 案例根因)。"""
+    body = bytes([HEADER, 0x04, Cmd.GET_CUR_COOLING_CONFIG])
+    return body + bytes([checksum(body)])
 
 
 def get_any_cooling(slot: int) -> bytes:
@@ -164,13 +168,18 @@ def parse_status_report(data: bytes) -> Optional[dict]:
 
 
 def parse_cur_cooling(data: bytes) -> Optional[dict]:
-    """cmd 0x25 应答: data = [mode][x][on][rpm_lo][rpm_hi][pct]。
-    ⚠️ pct 实测为 0~255 原始量 (观测 127~239), 并非 0~100 百分比;
-    疑似风扇 PWM/负载占空比, 确切语义未解。key 名保留 percent 以兼容历史调用。"""
+    """cmd 0x25 应答解析 (形态感知, 2026-10-06):
+    6B 简版: [mode][x][on][rpm_lo][rpm_hi][pct] —— rpm 为设备实际转速。
+    15B 全量 (LEN=3 短形态请求触发): [mode][x][on]+4×(温度,rpm16) 曲线+[pct],
+    **无独立 rpm 字段** —— 此时 rpm 返回 None (绝不能把锚点字节当 rpm, 45076 案)。
+    pct 实测为 0~255 原始量 (观测 127~239), 并非 0~100 百分比, 语义未解。
+    rpm 超出物理范围 (>4800) 一律视为解析失败置 None。key 名保留 percent 以兼容。"""
     if len(data) < 6:
         return None
-    return {'mode': data[0], 'on': data[2],
-            'rpm': data[3] | (data[4] << 8), 'percent': data[5]}
+    rpm = data[3] | (data[4] << 8) if len(data) == 6 else None
+    if rpm is not None and rpm > 4800:
+        rpm = None
+    return {'mode': data[0], 'on': data[2], 'rpm': rpm, 'percent': data[5]}
 
 
 def parse_firmware_version(data: bytes) -> str:

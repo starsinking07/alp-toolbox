@@ -416,11 +416,15 @@ class StatusPage(QWidget):
         if smart:
             self.lbl_mode.setText('智能变频 · 根据实时温度自动调节转速')
         elif c:
-            self.lbl_mode.setText(f'手动模式 · 当前固定 {c.get("rpm")} RPM')
+            rpm_now = c.get('rpm')
+            if not rpm_now:                      # 0x25 全量形态无 rpm / 异常护栏 → 显示配置值
+                rpm_now = self.ctx['cfg'].fixed_rpm
+            self.lbl_mode.setText(f'手动模式 · 当前固定 {rpm_now} RPM')
         self.stat_lbls['控制模式'].setText('智能变频' if smart else '手动模式')
         if c:
+            rpm_now = c.get('rpm') or self.ctx['cfg'].fixed_rpm
             self.stat_lbls['工作模式'].setText('曲线目标' if smart else '固定转速')
-            self.stat_lbls['目标转速'].setText(f'{c.get("rpm")} RPM')
+            self.stat_lbls['目标转速'].setText(f'{rpm_now} RPM')
         self.mini_curve.set_curve(self.ctx['main'].curve_pct())
 
 
