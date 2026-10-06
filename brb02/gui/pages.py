@@ -1044,12 +1044,14 @@ class CurvePage(QWidget):
 
 # ================= 设置页 (控制页) =================
 class ParamOptionsDialog(QDialog):
-    """屏幕参数选项 (0.1.8, 官方同款): 8 项按优先顺序勾选, 实时预览。"""
+    """屏幕参数选项 (0.1.8, 官方同款): 最多选 3 项, 勾选顺序 = 屏幕左右顺序。"""
+
+    MAX_SLOTS = 3
 
     def __init__(self, slots: list, parent=None):
         super().__init__(parent)
         self.setWindowTitle('参数选项')
-        self._slots = list(slots or [])
+        self._slots = list(slots or [])[:self.MAX_SLOTS]   # 旧配置脏数据截断
         v = QVBoxLayout(self)
         v.setSpacing(10)
         title = QLabel('参数选项')
@@ -1064,15 +1066,10 @@ class ParamOptionsDialog(QDialog):
             cb.toggled.connect(self._reorder)
             v.addWidget(cb)
             self._checks.append((key, cb))
-        hint = QLabel('选择先后顺序为屏幕左右顺序')
-        hint.setObjectName('CardHint')
-        hint.setAlignment(Qt.AlignCenter)
-        v.addWidget(hint)
-
-        pv = QLabel()
-        pv.setAlignment(Qt.AlignCenter)
-        self._preview_lbl = pv
-        v.addWidget(pv)
+        self.hint = QLabel('选择先后顺序为屏幕左右顺序 (最多 3 项)')
+        self.hint.setObjectName('CardHint')
+        self.hint.setAlignment(Qt.AlignCenter)
+        v.addWidget(self.hint)
 
         row = QHBoxLayout()
         ok = QPushButton('确定')
@@ -1083,22 +1080,23 @@ class ParamOptionsDialog(QDialog):
         row.addWidget(ok)
         row.addWidget(ca)
         v.addLayout(row)
-        self._render()
 
-    def _reorder(self):
-        """勾选顺序 = 优先顺序 (官方语义): 新勾选的追加到末尾, 取消即移除。"""
-        checked = [k for k, cb in self._checks if cb.isChecked()]
-        kept = [k for k in self._slots if k in checked]      # 保序
-        for k in checked:
-            if k not in kept:
-                kept.append(k)
-        self._slots = kept
-        self._render()
-
-    def _render(self):
-        img = render_param_preview(self._slots)
-        pm = QPixmap.fromImage(img.scaledToWidth(340, Qt.SmoothTransformation))
-        self._preview_lbl.setPixmap(pm)
+    def _reorder(self, on):
+        """勾选顺序 = 屏幕左右顺序: 新勾选追加末尾, 取消即移除; 最多 3 项。"""
+        cb = self.sender()
+        key = next((k for k, c in self._checks if c is cb), None)
+        if on:
+            if key and key not in self._slots:
+                if len(self._slots) >= self.MAX_SLOTS:
+                    cb.blockSignals(True)
+                    cb.setChecked(False)                    # 超限回退
+                    cb.blockSignals(False)
+                    self.hint.setText('最多选择 3 项')
+                    return
+                self._slots.append(key)
+                self.hint.setText('选择先后顺序为屏幕左右顺序')
+        else:
+            self._slots = [k for k in self._slots if k != key]
 
     def result_slots(self) -> list:
         return list(self._slots)
@@ -2285,40 +2283,6 @@ PARAM_LABELS = [
     ('ram',      '运行使用率', 'RAM /%'),
     ('time',     '时间', 'PM'),
 ]
-
-
-def render_param_preview(slots: list) -> QImage:
-    """参数页效果预览 (0.1.8): 黑底 428×142, 左上 FAN LV, 三槽按选中顺序渲染
-    (官方语义"选择先后顺序为屏幕左右顺序", 取前 3 项), 右下 USB 图标。"""
-    W, H = SCREEN_W, SCREEN_H
-    img = QImage(W, H, QImage.Format_RGB32)
-    img.fill(QColor('#0b1020'))                      # 深蓝黑底 (贴近设备实机)
-    p = QPainter(img)
-    p.setRenderHint(QPainter.Antialiasing)
-    mono = QFont('Segoe UI', 10)                 # 预览用系统字体 (GeistMono 打包在 exe, 预览不依赖)
-    big = QFont('Segoe UI', 30)
-    big.setBold(True)
-    p.setPen(QColor('#e8eef7'))
-    p.setFont(mono)
-    p.drawText(16, 30, 'FAN LV 1')                    # 左上: 档位 (设备本地)
-    p.setPen(QColor('#57c2ff'))
-    p.drawText(W - 46, 34, '⏚')                       # 右上: USB 简符
-    labels = {k: lbl for k, lbl, _ in PARAM_LABELS}
-    slots3 = [s for s in (slots or []) if s] [:3]
-    x_slots = [W * 0.06, W * 0.40, W * 0.72]
-    for i, key in enumerate(slots3):
-        x = int(x_slots[i])
-        p.setPen(QColor('#8fa3bd'))
-        p.setFont(mono)
-        p.drawText(x, H - 34, labels.get(key, key))
-        p.setPen(QColor('#ffffff'))
-        p.setFont(big)
-        demo = '10:08' if key == 'time' else '100'
-        if key == 'fan_rpm':
-            demo = '1600'
-        p.drawText(x, H - 8, demo)
-    p.end()
-    return img
 
 
 def fit_image(img: QImage, fit: str) -> QImage:

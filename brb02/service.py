@@ -586,6 +586,8 @@ class DeviceWorker(QThread):
         slots = list(getattr(self.config, 'param_slots', []) or [])
         if not slots:                       # 兼容模式: 官方全 7 项顺序
             slots = [k for k, _ in self.PARAM_DEFS]
+        else:
+            slots = slots[:3]               # 官方语义: 参数页最多 3 槽
         id_by_key = dict(self.PARAM_DEFS)
         out = []
         for key in slots:
