@@ -577,27 +577,28 @@ class DeviceWorker(QThread):
         return 0
 
     def _host_info_entries(self, cpu: float, gpu: float):
-        """构造 0x07 的 (ID, 值) 列表 —— 参数页推送与图片上传尾部心跳共用。
+        """构造 0x07 的 7 项 (ID, 值) —— 参数页推送与图片上传尾部心跳共用。
 
-        0.1.8 起按 config.param_slots (官方"参数选项") 动态组装: 选中项按顺序推对应
-        ID (官方预览语义"选择先后顺序为屏幕左右顺序"); **slots 为空 = 兼容模式**,
-        推全部 7 项 (与旧版行为一致)。ID 语义 2026-10-06 定案见 PARAM_DEFS
-        (旧版 ID02=GPU 功耗 / ID06=GPU 热点 / ID05 恒 74 均系误判修正)。"""
-        slots = list(getattr(self.config, 'param_slots', []) or [])
-        if not slots:                       # 兼容模式: 官方全 7 项顺序
-            slots = [k for k, _ in self.PARAM_DEFS]
-        else:
-            slots = slots[:3]               # 官方语义: 参数页最多 3 槽
-        id_by_key = dict(self.PARAM_DEFS)
-        out = []
-        for key in slots:
-            sid = id_by_key.get(key)
-            if sid is None:
-                continue
-            out.append((sid, self._param_value(key, cpu, gpu)))
-        if not out:                         # 兜底: 至少推时间
-            out.append((0x07, self._param_value('time', cpu, gpu)))
-        return out
+        2026-10-06 定案 (capme3 抓包): 设备参数页三槽标签固画 (GPU℃←ID01 /
+        CPU℃←ID00 / 第三槽"%"←ID03), **槽绑定固件固定不可配** (官方"参数选项"
+        弹窗点确定不发任何命令, 系摆设); 0xC2 为官方保活心跳 (三递增计数)。
+        因此推送恒为 7 项模板, **第三槽 (ID03) 的数据源由 config.param_slot3
+        选择** (CPU负载/GPU负载/内存/磁盘)。ID02=GPU 负载 / ID06=CPU 负载
+        (设备无对应槽, 推真值无害); ID07=时间。"""
+        tp = self.temps
+        lt = time.localtime()
+        gt = int(round(gpu)) if gpu and gpu > 1 else 0
+        src3 = getattr(self.config, 'param_slot3', 'cpu_load') or 'cpu_load'
+        v3 = self._param_value(src3, cpu, gpu)
+        return [
+            (0x00, int(round(cpu)) if cpu and cpu > 1 else 0),
+            (0x01, gt),                                # GPU 温度 (槽1)
+            (0x02, int(round(tp.gpu_load)) if tp.gpu_load is not None else 0),
+            (0x03, v3),                                # 参数页第三槽 (可配数据源)
+            (0x05, int(round(tp._ram_percent() or 0))),
+            (0x06, int(round(tp.cpu_load)) if tp.cpu_load is not None else 0),
+            (0x07, lt.tm_hour * 60 + lt.tm_min),
+        ]
 
     def _push_host_info07(self, cpu: float, gpu: float):
         """屏幕参数页推送 (1Hz), 格式/ID 语义见 protocol.build_host_info。"""

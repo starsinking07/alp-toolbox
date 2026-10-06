@@ -1043,65 +1043,6 @@ class CurvePage(QWidget):
 
 
 # ================= 设置页 (控制页) =================
-class ParamOptionsDialog(QDialog):
-    """屏幕参数选项 (0.1.8, 官方同款): 最多选 3 项, 勾选顺序 = 屏幕左右顺序。"""
-
-    MAX_SLOTS = 3
-
-    def __init__(self, slots: list, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle('参数选项')
-        self._slots = list(slots or [])[:self.MAX_SLOTS]   # 旧配置脏数据截断
-        v = QVBoxLayout(self)
-        v.setSpacing(10)
-        title = QLabel('参数选项')
-        title.setObjectName('PageTitle')
-        title.setAlignment(Qt.AlignCenter)
-        v.addWidget(title)
-
-        self._checks = []
-        for key, name, _ in PARAM_LABELS:
-            cb = QCheckBox(name)
-            cb.setChecked(key in self._slots)
-            cb.toggled.connect(self._reorder)
-            v.addWidget(cb)
-            self._checks.append((key, cb))
-        self.hint = QLabel('选择先后顺序为屏幕左右顺序 (最多 3 项)')
-        self.hint.setObjectName('CardHint')
-        self.hint.setAlignment(Qt.AlignCenter)
-        v.addWidget(self.hint)
-
-        row = QHBoxLayout()
-        ok = QPushButton('确定')
-        ok.setObjectName('Primary')
-        ok.clicked.connect(self.accept)
-        ca = QPushButton('取消')
-        ca.clicked.connect(self.reject)
-        row.addWidget(ok)
-        row.addWidget(ca)
-        v.addLayout(row)
-
-    def _reorder(self, on):
-        """勾选顺序 = 屏幕左右顺序: 新勾选追加末尾, 取消即移除; 最多 3 项。"""
-        cb = self.sender()
-        key = next((k for k, c in self._checks if c is cb), None)
-        if on:
-            if key and key not in self._slots:
-                if len(self._slots) >= self.MAX_SLOTS:
-                    cb.blockSignals(True)
-                    cb.setChecked(False)                    # 超限回退
-                    cb.blockSignals(False)
-                    self.hint.setText('最多选择 3 项')
-                    return
-                self._slots.append(key)
-                self.hint.setText('选择先后顺序为屏幕左右顺序')
-        else:
-            self._slots = [k for k in self._slots if k != key]
-
-    def result_slots(self) -> list:
-        return list(self._slots)
-
-
 class ControlPage(QWidget):
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
@@ -1527,10 +1468,16 @@ class ControlPage(QWidget):
         n = int(getattr(cfg, 'screen_upload_count', 0) or 0)
         self.lbl_wear = QLabel(
             f'📊 屏幕闪存已上屏 {n} 次' + (f' ≈ 寿命消耗 {n / 10.0:.1f}% (按 10 万次擦写/页 估算)' if n else ''))
-        btn_param = QPushButton('参数选项…')
-        btn_param.clicked.connect(self._param_options)
-        btn_param.setToolTip('自定义散热器参数页显示的项与顺序 (官方"参数选项"同款)')
-        cv5.addWidget(_setting_row('参数页选项', '自选 8 项参数与左右顺序, 实时推送到散热器屏幕', '📺', btn_param))
+        self.cmb_slot3 = QComboBox()
+        for k, txt in [('cpu_load', 'CPU 负载'), ('gpu_load', 'GPU 负载'),
+                       ('ram', '运行使用率 (内存)'), ('disk', '磁盘占用率')]:
+            self.cmb_slot3.addItem(txt, k)
+        self.cmb_slot3.setCurrentIndex(max(0, self.cmb_slot3.findData(
+            getattr(cfg, 'param_slot3', 'cpu_load'))))
+        self.cmb_slot3.currentIndexChanged.connect(self._slot3_changed)
+        self.cmb_slot3.setToolTip(
+            '参数页第三槽 (百分比槽) 显示的数据源; 前两槽固定为 GPU 温度 / CPU 温度')
+        cv5.addWidget(_setting_row('参数页第三槽', '百分比槽显示的数据源 (前两槽固定 GPU/CPU 温度)', '📺', self.cmb_slot3))
         self.lbl_wear.setObjectName('CardHint')
         self.lbl_wear.setWordWrap(True)
         cv5.addWidget(self.lbl_wear)
@@ -1661,12 +1608,10 @@ class ControlPage(QWidget):
         except Exception:
             pass
 
-    def _param_options(self):
-        from PySide6.QtWidgets import QDialog
-        dlg = ParamOptionsDialog(list(getattr(self.ctx['cfg'], 'param_slots', []) or []), self)
-        if dlg.exec() == QDialog.Accepted:
-            self.ctx['cfg'].param_slots = dlg.result_slots()
-            self.ctx['cfg'].save()
+    def _slot3_changed(self, idx):
+        cfg = self.ctx['cfg']
+        cfg.param_slot3 = self.cmb_slot3.itemData(idx) or 'cpu_load'
+        cfg.save()
 
     def _on_upload_count(self, n):
         try:
