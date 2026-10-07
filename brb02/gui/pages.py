@@ -1794,8 +1794,13 @@ class ControlPage(QWidget):
         for c in ctrls:
             c.blockSignals(True)
         try:
-            idx = {m: i for i, (_, m) in enumerate(self._light_modes)}.get(eff['mode'], 2)
+            mode_raw = eff['mode']
+            idx = {m: i for i, (_, m) in enumerate(self._light_modes)}.get(mode_raw & 0x0F, 2)
             self.cmb_light_mode.setCurrentIndex(idx)
+            if getattr(self, 'cmb_color_opt', None) is not None:
+                co = self.cmb_color_opt.findData((mode_raw >> 4) & 0x0F)
+                if co >= 0:
+                    self.cmb_color_opt.setCurrentIndex(co)   # 回读带出当前配色
             self.cmb_light_cm.setCurrentIndex(0 if eff['color_mode'] == protocol.RGB_COLOR_SINGLE else 1)
             r, g, b = eff['rgb']
             hue = int(colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)[0] * 360) if max(r, g, b) else 0

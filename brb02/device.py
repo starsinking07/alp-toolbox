@@ -216,9 +216,11 @@ class Brb02Device:
         return True
 
     def set_rgb_effect(self, mode: int, speed: int, brightness: int,
-                       color_mode: int, rgb) -> bool:
-        """完整灯效写入 (模式/速度/亮度/单彩/颜色), 字段语义见 protocol.set_rgb_effect。"""
-        self._send(protocol.set_rgb_effect(mode, speed, brightness, color_mode, rgb),
+                       color_mode: int, rgb, color_option: int | None = None) -> bool:
+        """完整灯效写入 (模式/速度/亮度/单彩/颜色), 字段语义见 protocol.set_rgb_effect。
+        color_option: 彩色流动配色序号 0-4 (None = 不动高 4 位)。"""
+        self._send(protocol.set_rgb_effect(mode, speed, brightness, color_mode, rgb,
+                                           color_option=color_option),
                    wait_s=0.3)
         return True
 

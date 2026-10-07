@@ -295,7 +295,8 @@ def set_rgb_effect(mode: int, speed: int, brightness: int,
     color_mode 01=单色 0a=彩色; rgb = 色调 (单色模式下的颜色)。
     ⚠️ 音频同步(0x07)需要配套 0x15 电平流, GUI 暂不提供该模式。"""
     r, g, b = rgb
-    mode_b = mode & 0x0F if color_option is None else ((int(color_option) & 0x0F) << 4) | (mode & 0x0F)
+    mode_b = (mode & 0xFF) if color_option is None else (
+        ((int(color_option) & 0x0F) << 4) | (mode & 0x0F))
     # payload[0] 高 4 位 = 配色选项序号 (0 彩虹/1 蓝紫追逐/2 黄绿/3 红蓝/4 橙紫,
     # 仅彩色流动槽位 1 生效); 低 4 位 = 模式槽位 (PIut02 DLL 静态分析)
     params = bytes([mode_b & 0xFF, speed & 0xFF, (speed >> 8) & 0xFF,
