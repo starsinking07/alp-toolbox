@@ -106,6 +106,7 @@ class DeviceWorker(QThread):
         self._last_scene_key = None
         self._temp_wall_active = False        # 温度墙激活态 (0.1.9)
         self._read_req = False                # 屏图读回请求 (0.1.8)
+        self._cooling_src = None              # 0x24 参照源缓存 (0x25 byte[0] 原样保留)
         self._audio_pusher = None             # 音频同步电平源 (0.1.8)
         self._keypress_pusher = None          # 按键事件源 (0.1.8)
         self._scene_applied_key = None        # 场景应用态 (('p',idx)/('none',proc))
@@ -707,7 +708,7 @@ class DeviceWorker(QThread):
         self._upload_cancel.clear()
         with self._screen_qlock:             # 队列操作持锁 (审计 G6)
             self._screen_queue.clear()       # 手动图片优先: 清掉待执行的自动上屏
-        self._upload_req = (path, flip_h, flip_v, fit)
+        self._upload_req = (path, flip_h, flip_v, fit, zoom, pan_x, pan_y)
         self._screen_cancel.clear()   # 新上传不应继承上一次取消的残留状态
 
     def cancel_image_upload(self):

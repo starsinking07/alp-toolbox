@@ -2349,6 +2349,21 @@ PARAM_LABELS = [
 ]
 
 
+def _cover_with_zoom_pan(img: QImage, zoom: int, pan_x: int, pan_y: int) -> QImage:
+    """cover + 缩放/平移预览 (与 screen_upload.qimage_to_rgb565_be 的 cover 数学同源)。"""
+    from PySide6.QtCore import QRect
+    sw, sh = img.width(), img.height()
+    tar = SCREEN_W / SCREEN_H
+    z = max(100, int(zoom or 100)) / 100.0
+    cw, ch = int(round(sh * tar / z)), int(round(sh / z))
+    if cw > sw:
+        cw, ch = int(round(sh * tar)), sh
+    sx = int((sw - cw) * (max(-100, min(100, int(pan_x or 0))) + 100) / 200)
+    sy = int((sh - ch) * (max(-100, min(100, int(pan_y or 0))) + 100) / 200)
+    return img.copy(max(0, sx), max(0, sy), min(cw, sw), min(ch, sh)).scaled(
+        SCREEN_W, SCREEN_H, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+
+
 def fit_image(img: QImage, fit: str) -> QImage:
     """把任意图变成 428×142 画布预览 (与上传画布同一规则)。
 
@@ -2415,6 +2430,38 @@ class ScreenPage(QWidget):
         fit_row.addWidget(self.fit_combo)
         fit_row.addStretch(1)
         cv.addLayout(fit_row)
+
+        # 缩放/平移 (0.1.8, cover 模式生效; PIut02 同款交互)
+        zoom_card, _, zv = _card('缩放与位置', '“cover 裁边”模式下可放大 100~400% 并平移画面, 实时预览与上传同源。')
+        zrow = QHBoxLayout()
+        zrow.setSpacing(10)
+        zrow.addWidget(QLabel('缩放'))
+        self.sld_zoom = QSlider(Qt.Horizontal)
+        self.sld_zoom.setRange(100, 400)
+        self.sld_zoom.setValue(100)
+        self.sld_zoom.valueChanged.connect(self._zoom_pan_changed)
+        zrow.addWidget(self.sld_zoom, 1)
+        self.lbl_zoom = QLabel('100%')
+        self.lbl_zoom.setObjectName('StatVal')
+        zrow.addWidget(self.lbl_zoom)
+        zv.addLayout(zrow)
+        prow2 = QHBoxLayout()
+        prow2.setSpacing(10)
+        prow2.addWidget(QLabel('水平位置'))
+        self.sld_panx = QSlider(Qt.Horizontal)
+        self.sld_panx.setRange(-100, 100)
+        self.sld_panx.setValue(0)
+        self.sld_panx.valueChanged.connect(self._zoom_pan_changed)
+        prow2.addWidget(self.sld_panx, 1)
+        prow2.addWidget(QLabel('垂直位置'))
+        self.sld_pany = QSlider(Qt.Horizontal)
+        self.sld_pany.setRange(-100, 100)
+        self.sld_pany.setValue(0)
+        self.sld_pany.valueChanged.connect(self._zoom_pan_changed)
+        prow2.addWidget(self.sld_pany, 1)
+        zv.addLayout(prow2)
+        self._sync_zoom_enabled()
+        v.addWidget(zoom_card)
 
         row = QHBoxLayout()
         row.setSpacing(10)
@@ -2586,6 +2633,9 @@ class ScreenPage(QWidget):
             img = self._load_canvas_bin(self._path)
         else:
             img = QImage(self._path) if self._path else QImage()
+        if not img.isNull() and self._fit == 'cover':
+            zoom, px, py = self._zoom_pan_values()
+            img = _cover_with_zoom_pan(img, zoom, px, py)
         self._img_valid = not img.isNull()   # 解码失败 → 置无效, _sync_buttons 据此禁上传
         if img.isNull():
             self.preview.setPixmap(QPixmap())
@@ -2597,12 +2647,30 @@ class ScreenPage(QWidget):
         self.preview.setText('')
         self.preview.setPixmap(QPixmap.fromImage(img))
 
+    def _zoom_pan_values(self):
+        return (self.sld_zoom.value(), self.sld_panx.value(), self.sld_pany.value())
+
+    def _zoom_pan_changed(self, *_):
+        if not hasattr(self, 'sld_pany'):    # 构造期控件未齐 (setValue 触发)
+            return
+        self.lbl_zoom.setText(f'{self.sld_zoom.value()}%')
+        en = self._fit == 'cover'
+        for s in (self.sld_zoom, self.sld_panx, self.sld_pany):
+            s.setEnabled(en)
+        self._render_preview()
+
+    def _sync_zoom_enabled(self):
+        en = self._fit == 'cover'
+        for s in (self.sld_zoom, self.sld_panx, self.sld_pany):
+            s.setEnabled(en)
+
     def _on_fit_changed(self, _idx):
         try:
             self.cfg.image_fit = self._fit
             self.cfg.save()
         except Exception:
             pass
+        self._sync_zoom_enabled()            # 切 cover 启用缩放/平移, 切回禁用 (自检③)
         if self._path:
             self._render_preview()
 
