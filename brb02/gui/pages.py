@@ -1195,6 +1195,25 @@ class ControlPage(QWidget):
         cv1.addWidget(_setting_row('设备连接', '扫描并连接当前连接方式下的散热器', '📡', b))
         dv.addWidget(card1)
 
+        # --- 设备信息 (0.1.8, 官方"设备信息"卡同款: 智能启停 + 通电自启) ---
+        info_card, _, iv = _card(
+            '设备信息',
+            'BRB02 笔记本散热器 · 固件随设备读写。两路开关为设备端行为, '
+            '每次连接成功后自动下发 (0x02/0x03 回读确认)。')
+        iv.addWidget(_setting_row('设备名称', '', '🏷️', QLabel('BRB02 笔记本散热器')))
+        self.tgl_dev_smart = Toggle(cfg.device_smart_startstop)
+        self.tgl_dev_smart.toggled = self._dev_smart_toggled
+        iv.addWidget(_setting_row(
+            '智能启停', '散热器风扇随电脑开关机 (设备端行为)', '⏻', self.tgl_dev_smart))
+        self.tgl_dev_power = Toggle(cfg.device_power_on)
+        self.tgl_dev_power.toggled = self._dev_power_toggled
+        iv.addWidget(_setting_row(
+            '通电自启', '散热器接入电源自动开机 (设备端行为)', '🔌', self.tgl_dev_power))
+        self.lbl_fw = QLabel(getattr(self.ctx['worker'], 'firmware_version', '') or '3.0.3')
+        self.lbl_fw.setObjectName('StatVal')
+        iv.addWidget(_setting_row('固件版本', '', '🧬', self.lbl_fw))
+        dv.addWidget(info_card)
+
         # 调试面板 (高级)
         dbg, _, dgv = _card('调试面板', '发送原始协议命令 · 仅在确认命令含义后使用, 错误命令可能导致设备异常')
         self.edit_dbg = QLineEdit()
@@ -1497,6 +1516,7 @@ class ControlPage(QWidget):
         cv5.addWidget(self.lbl_wear)
         try:
             self.ctx['worker'].uploadCountChanged.connect(self._on_upload_count)
+            self.ctx['worker'].deviceSwitchesChanged.connect(self._on_device_switches)
         except Exception:
             pass
         hv.addWidget(card5)
@@ -1607,6 +1627,41 @@ class ControlPage(QWidget):
     def _spike_changed(self, on):
         self.ctx['cfg'].spike_filter = on
         self.ctx['cfg'].save()
+
+    def _dev_smart_toggled(self, on):
+        self.ctx['cfg'].device_smart_startstop = bool(on)
+        self.ctx['cfg'].save()
+        self._push_device_switches_safe()
+
+    def _dev_power_toggled(self, on):
+        self.ctx['cfg'].device_power_on = bool(on)
+        self.ctx['cfg'].save()
+        self._push_device_switches_safe()
+
+    def _push_device_switches_safe(self):
+        try:
+            self.ctx['worker'].set_device_switches(
+                self.ctx['cfg'].device_smart_startstop,
+                self.ctx['cfg'].device_power_on)
+        except Exception:
+            pass
+
+    def _on_device_switches(self, res: dict):
+        """连接后回读确认 → 同步开关显示 (设备真实状态优先于本地缓存)。"""
+        try:
+            for tg, key in ((self.tgl_dev_smart, 'smart_startstop'),
+                            (self.tgl_dev_power, 'power_on')):
+                tg.blockSignals(True)
+                tg.setChecked(bool(res.get(key)))
+                tg.blockSignals(False)
+            try:
+                fw = self.ctx['worker'].device.get_firmware_version()
+                if fw:
+                    self.lbl_fw.setText(fw)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _scene_toggled(self, on):
         self.ctx['cfg'].scene_enabled = bool(on)

@@ -177,6 +177,32 @@ def set_lcd_show_pos(ids, pos: int = 0) -> bytes:
     return build_frame(0xC2, params)
 
 
+# ---- 设备开关向量 (0x02/0x03, 2026-10-06 定案: FanControlPortable/PIut02 交叉验证
+# + capme3 官方会话开场样本 a5 06 02 00 01 与官方 UI 开关状态逐位吻合) ----
+# 0x02 写 2 字节向量 [智能启停][通电自启] (0x01=开/0x00=关), 应答 a5 05 02 00;
+# 0x03 读同一向量 (空载荷), 应答 cmd=0x03 payload 2 字节同布局。
+# 语义: 智能启停 = 散热器风扇随电脑开关机; 通电自启 = 散热器接入电源自动开机。
+# 官方每次会话开场都推 0x02 (按 PC 端配置) —— 设备端持久化未知, 跟随官方每连接重推。
+
+
+def set_on_off_vector(smart_startstop: bool, power_on: bool) -> bytes:
+    """构造 0x02 开关向量帧 (智能启停 + 通电自启)。"""
+    return build_frame(0x02, bytes([0x01 if smart_startstop else 0x00,
+                                    0x01 if power_on else 0x00]))
+
+
+def get_on_off_vector() -> bytes:
+    """构造 0x03 读开关向量帧 (空载荷)。"""
+    return build_frame(0x03)
+
+
+def parse_on_off_vector(data: bytes):
+    """0x03 应答 payload (2 字节) → {'smart_startstop': bool, 'power_on': bool}。"""
+    if len(data) < 2:
+        return None
+    return {'smart_startstop': data[0] != 0, 'power_on': data[1] != 0}
+
+
 def restore_factory() -> bytes:
     """恢复出厂设置 (抢救用)"""
     return build_frame(Cmd.RESTORE_FACTORY)

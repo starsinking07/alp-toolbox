@@ -78,6 +78,7 @@ class DeviceWorker(QThread):
     uploadFinished = Signal(dict)          # 上传结束 (结果 dict, 见 device.upload_canvas)
     uploadCountChanged = Signal(int)       # 磨损计数变化 (累计成功上屏次数, 0.1.9)
     screenReadFinished = Signal(dict)      # 屏图读回结束 (0.1.8 历史图片备份)
+    deviceSwitchesChanged = Signal(dict)   # 设备端开关回读确认 (智能启停/通电自启)
     deviceGearChanged = Signal(int, int)   # 散热器实体按钮换档 (level, rpm) — 0x25 轮询检测
 
     def __init__(self, config: Config, parent=None):
@@ -577,6 +578,30 @@ class DeviceWorker(QThread):
             (0x06, int(round(tp._ram_percent() or 0))),  # 内存占用率%
             (0x07, lt.tm_hour * 60 + lt.tm_min),
         ]
+
+    def push_device_switches(self):
+        """下发设备端开关向量 (0x02: 智能启停 + 通电自启) 并 0x03 回读确认,
+        结果经 deviceSwitchesChanged 信号刷新 UI。"""
+        from .logbuf import LOGBUF
+        cfg = self.config
+        res = self.device.set_on_off_vector(
+            bool(getattr(cfg, 'device_smart_startstop', False)),
+            bool(getattr(cfg, 'device_power_on', True)))
+        if res:
+            LOGBUF.write(f"[设备] 开关向量已生效: 智能启停={'开' if res['smart_startstop'] else '关'} "
+                         f"通电自启={'开' if res['power_on'] else '关'} (回读确认)")
+            self.deviceSwitchesChanged.emit(res)
+        else:
+            LOGBUF.write('[设备] 开关向量写入/回读失败 (设备未就绪?)')
+
+    def set_device_switches(self, smart_startstop: bool, power_on: bool):
+        """UI 设置设备端开关: 保存偏好 + 立即下发。"""
+        from .logbuf import LOGBUF
+        cfg = self.config
+        cfg.device_smart_startstop = bool(smart_startstop)
+        cfg.device_power_on = bool(power_on)
+        cfg.save()
+        self.push_device_switches()
 
     def send_param_page_config(self):
         """下发 0xC2 SetLcdShowPos (参数页三格显示配置), 等 ACK 记日志。
@@ -1160,6 +1185,10 @@ class DeviceWorker(QThread):
             self._scene_saved = None
             try:
                 self.send_param_page_config()   # 重连后重推参数页显示配置 (0xC2)
+            except Exception:
+                pass
+            try:
+                self.push_device_switches()     # 重连后重推智能启停/通电自启 (0x02, 同官方开场)
             except Exception:
                 pass
             self._connect_ts = time.time()

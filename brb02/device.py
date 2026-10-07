@@ -131,6 +131,23 @@ class Brb02Device:
                     last = d
         return last
 
+    def set_on_off_vector(self, smart_startstop: bool, power_on: bool) -> dict | None:
+        """写 0x02 开关向量 (智能启停 + 通电自启) 并 0x03 回读确认。
+        返回回读确认后的向量 dict; None = 写入或回读失败 (状态未知)。"""
+        self._send(protocol.set_on_off_vector(smart_startstop, power_on), wait_s=0.3)
+        cur = self.get_on_off_vector()
+        if cur and cur.get('smart_startstop') == bool(smart_startstop)                 and cur.get('power_on') == bool(power_on):
+            return cur
+        return None
+
+    def get_on_off_vector(self) -> dict | None:
+        """读 0x03 开关向量 (智能启停 + 通电自启)。失败/超时返回 None。"""
+        rxs = self._send(protocol.get_on_off_vector(), wait_s=0.4)
+        for cmd, data in rxs:
+            if cmd == 0x03:
+                return protocol.parse_on_off_vector(data)
+        return None
+
     def get_firmware_version(self) -> str:
         rxs = self._send(protocol.get_firmware_version())
         for cmd, data in rxs:

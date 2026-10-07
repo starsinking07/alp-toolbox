@@ -76,6 +76,10 @@ class Config:
     image_fit: str = 'stretch'          # 'stretch'=拉伸铺满 | 'cover'=等比放大后居中裁边
     # 屏幕写入磨损计数 (0.1.9): 累计成功上屏次数
     screen_upload_count: int = 0
+    # 设备端开关 (0.1.8, 官方"设备信息"卡同款): 智能启停 (散热器风扇随电脑开关机)
+    # 与通电自启 (散热器接入电源自动开机) —— 每次连接成功后经 0x02 下发 (同官方会话开场)。
+    device_smart_startstop: bool = False
+    device_power_on: bool = True          # 官方默认 = 通电自启开
     # 屏幕参数页显示配置 (0.1.8): 0xC2 SetLcdShowPos 三格的参数 id (最多 3,
     # 顺序=屏幕左右)。默认 [0, 1, 7] = CPU温度/GPU温度/时间 (官方默认)。
     # 可选 id 见 protocol.LCD_PARAM_DEFS。设备槽位/几何随此命令配置。
