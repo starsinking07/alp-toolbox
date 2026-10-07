@@ -1392,11 +1392,11 @@ class ControlPage(QWidget):
             ('彩色流动', protocol.RGB_MODE_FLOW), ('彩色循环', protocol.RGB_MODE_CYCLE),
             ('呼吸', protocol.RGB_MODE_BREATH), ('常亮', protocol.RGB_MODE_STEADY),
             ('闪烁', protocol.RGB_MODE_BLINK), ('响应', protocol.RGB_MODE_REACTIVE),
-            ('刷新', protocol.RGB_MODE_REFRESH)]
+            ('音频同步', protocol.RGB_MODE_AUDIO), ('刷新', protocol.RGB_MODE_REFRESH)]
         self.cmb_light_mode = QComboBox()
         self.cmb_light_mode.addItems([n for n, _ in self._light_modes])
         self.cmb_light_mode.currentIndexChanged.connect(self._light_apply)
-        cv4.addWidget(_setting_row('灯效模式', '除音频同步外与官方全量一致', '✨', self.cmb_light_mode))
+        cv4.addWidget(_setting_row('灯效模式', '与官方全量一致; 音频同步=跟随系统声音, 响应=跟随按键', '✨', self.cmb_light_mode))
         self.cmb_light_cm = QComboBox()
         self.cmb_light_cm.addItems(['单色', '彩色'])
         self.cmb_light_cm.currentIndexChanged.connect(self._light_apply)
@@ -1431,12 +1431,19 @@ class ControlPage(QWidget):
         cv4.addWidget(hue_row)
         self.lbl_bri = QLabel('80')
         self.lbl_bri.setObjectName('StatVal')
-        bri_row, self.sld_bri = _light_slider_row('亮度', '0-100', '💡', (0, 100), 80, self.lbl_bri)
+        bri_row, self.sld_bri = _light_slider_row('亮度', '10-100 (设备量程)', '💡', (10, 100), 80, self.lbl_bri)
         cv4.addWidget(bri_row)
         self.lbl_spd = QLabel('3.0s')
         self.lbl_spd.setObjectName('StatVal')
         spd_row, self.sld_spd = _light_slider_row('速度', '左慢右快', '⚡', (0, 100), 50, self.lbl_spd)
         cv4.addWidget(spd_row)
+        self.cmb_color_opt = QComboBox()
+        for txt, val in [('配色 0 · 彩虹', 0), ('配色 1 · 蓝紫追逐', 1), ('配色 2 · 黄绿', 2),
+                         ('配色 3 · 红蓝', 3), ('配色 4 · 橙紫', 4)]:
+            self.cmb_color_opt.addItem(txt, val)
+        self.cmb_color_opt.setToolTip('仅"彩色流动"模式的配色选项 (0x12 高 4 位)')
+        opt_row = _setting_row('配色选项', '', '🌈', self.cmb_color_opt)
+        cv4.addWidget(opt_row)
         b_apply = QPushButton('应用到设备')
         b_apply.setObjectName('Primary')
         b_apply.clicked.connect(self._light_apply)
@@ -1754,17 +1761,25 @@ class ControlPage(QWidget):
         cm = protocol.RGB_COLOR_SINGLE if self.cmb_light_cm.currentIndex() == 0 else protocol.RGB_COLOR_MULTI
         r, g, b = (int(c * 255) for c in colorsys.hsv_to_rgb(self.sld_hue.value() / 360.0, 1, 1))
         speed = 5000 - self.sld_spd.value() * 40      # 左慢右快: 5000ms .. 1000ms
-        return mode, speed, self.sld_bri.value(), cm, (r, g, b)
+        color_opt = (self.cmb_color_opt.currentData()
+                     if getattr(self, 'cmb_color_opt', None) and mode == protocol.RGB_MODE_FLOW
+                     else None)                        # 配色仅彩色流动生效 (其余模式低 4 位原样)
+        return mode, speed, self.sld_bri.value(), cm, (r, g, b), color_opt
 
     def _light_preview(self, *_):
-        _, speed, _, _, (r, g, b) = self._light_ui_values()
+        _, speed, _, _, (r, g, b), _co = self._light_ui_values()
         self.lbl_swatch.setStyleSheet(f'background: rgb({r},{g},{b}); border-radius: 4px;')
         self.lbl_bri.setText(str(self.sld_bri.value()))
         self.lbl_spd.setText(f'{speed / 1000:.1f}s')
 
     def _light_apply(self, *_):
         self._light_preview()
+        mode, *_rest = self._light_ui_values()
         self.ctx['worker'].set_lighting(*self._light_ui_values())
+        try:
+            self.ctx['worker'].apply_light_mode_effects(mode)   # 音频 0x15 / 响应 0x16 联动流
+        except Exception:
+            pass
 
     def _light_refresh(self):
         sw = self.ctx['worker'].get_rgb_switch()

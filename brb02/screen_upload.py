@@ -184,13 +184,17 @@ def _canvas_bytes(canvas) -> bytes:
     return bytes(out)
 
 
-def qimage_to_rgb565_be(img, fit: str = 'stretch') -> bytes:
+def qimage_to_rgb565_be(img, fit: str = 'stretch',
+                        zoom: int = 100, pan_x: int = 0, pan_y: int = 0) -> bytes:
     """内存 QImage → 缩放 428×142 → RGB565 **大端** 121,552B (**不落盘**)。
 
     监控上屏路径专用: `monitor_canvas.render()` 直接产出 QImage, 走这里量化。
     缩放/合成规则与 `image_to_rgb565_be` **完全一致** (同一实现), 带 alpha 按**黑底**合成。
 
     ⚠️ 输出 = **整张画布** 121,552B (428×142); 块流只取前 121,510B, 末 42B 走尾帧。
+    ⚠️ zoom/pan 仅 fit='cover' 生效 (0.1.8 图片页自由调节): zoom=100 为 cover 基准
+    放大, pan_x/pan_y = -100..100 (相对可平移余量的百分比)。zoom=100/pan=0 = 原版
+    cover 居中裁边 (真机验证路径, 不变)。
     """
     from PySide6.QtCore import QRect
     from PySide6.QtGui import QImage, QPainter
@@ -210,11 +214,14 @@ def qimage_to_rgb565_be(img, fit: str = 'stretch') -> bytes:
             if sw <= 0 or sh <= 0:
                 painter.drawImage(dst, img)
             else:
-                if sw / sh > tar:                    # 源更宽 → 裁左右
+                z = max(100, int(zoom or 100)) / 100.0
+                cw, ch = int(round(sh * tar / z)), int(round(sh / z))
+                if cw > sw:                          # zoom 过小不足覆盖 → 回退基准
                     cw, ch = int(round(sh * tar)), sh
-                else:                                # 源更高 → 裁上下
-                    cw, ch = sw, int(round(sw / tar))
-                sx, sy = (sw - cw) // 2, (sh - ch) // 2
+                if ch > sw * tar and ch > sh:
+                    pass
+                sx = int((sw - cw) * (max(-100, min(100, int(pan_x or 0))) + 100) / 200)
+                sy = int((sh - ch) * (max(-100, min(100, int(pan_y or 0))) + 100) / 200)
                 painter.drawImage(dst, img, QRect(sx, sy, cw, ch))
         else:
             painter.drawImage(dst, img)              # stretch: 原封不动 (封版路径)
@@ -223,7 +230,8 @@ def qimage_to_rgb565_be(img, fit: str = 'stretch') -> bytes:
     return _canvas_bytes(canvas)
 
 
-def image_to_rgb565_be(path: str, fit: str = 'stretch') -> bytes:
+def image_to_rgb565_be(path: str, fit: str = 'stretch',
+                       zoom: int = 100, pan_x: int = 0, pan_y: int = 0) -> bytes:
     """任意 PNG/JPG → 缩放 428×142 → RGB565 **大端** 121,552B。
 
     fit='stretch' (**默认, 设备已验证路径**): 拉伸铺满画布, 不保持宽高比 (会形变)。
@@ -240,7 +248,7 @@ def image_to_rgb565_be(path: str, fit: str = 'stretch') -> bytes:
     src = QImage(str(path))
     if src.isNull():
         raise ValueError(f'无法解码图片 (QImage 返回 null): {path}')
-    return qimage_to_rgb565_be(src, fit=fit)
+    return qimage_to_rgb565_be(src, fit=fit, zoom=zoom, pan_x=pan_x, pan_y=pan_y)
 
 
 # ─────────────────────────── 帧构建 ───────────────────────────

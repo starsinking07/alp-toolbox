@@ -121,24 +121,25 @@ def get_lcd_switch() -> bytes:
     return bytes([HEADER, 0x03, 0x6A, checksum(bytes([HEADER, 0x03, 0x6A]))])
 
 
-def set_cooling_fixed(rpm: int, level: int = 1) -> bytes:
+def set_cooling_fixed(rpm: int, level: int = 1, src: int | None = None) -> bytes:
     """固定转速 + 档位 (实测可用)。
-    帧: [A5][09][24][00][00][level][rpm16][ck]
+    帧: [A5][09][24][src][00][level][rpm16][ck] (src=参照源, 原样保留, PIut02 实践)
     ⚠️ 第三参数是档位 01-04, 不是开关 —— 设备端风扇性能预设 (官方档名
     低噪/平衡/强效/超频, 每档有独立曲线槽; 设备为纯风冷压风式, 无制冷片)。
     固定转速下档位不限制转速 (L1-L4 @3200RPM 实测均不受限)。"""
     rpm = max(0, min(4800, int(rpm)))
     level = max(1, min(4, int(level)))
     return build_frame(Cmd.SET_COOLING_CONFIG,
-                       bytes([0x00, 0x00, level, rpm & 0xFF, (rpm >> 8) & 0xFF]))
+                       bytes([0x00 if src is None else (int(src) & 0xFF), 0x00, level,
+                              rpm & 0xFF, (rpm >> 8) & 0xFF]))
 
 
-def set_cooling_curve(anchors: list[tuple[int, int]], level: int = 1) -> bytes:
+def set_cooling_curve(anchors: list[tuple[int, int]], level: int = 1, src: int | None = None) -> bytes:
     """智能变频曲线: 4 个 (温度°C, 转速RPM) 锚点, 写入指定档位 (01-04) 的曲线槽。
     帧: [A5][13][24][00][01][level][t1][rpm1_16][t2][rpm2_16]...[t4][rpm4_16][C8][ck]
     ⚠️ 锚点必须单调合法, 否则会写坏设备配置导致开机循环!"""
     assert len(anchors) == 4, '需要 4 个锚点'
-    params = bytes([0x00, 0x01, max(1, min(4, int(level)))])
+    params = bytes([0x00 if src is None else (int(src) & 0xFF), 0x01, max(1, min(4, int(level)))])
     for t, rpm in anchors:
         params += bytes([t & 0xFF, rpm & 0xFF, (rpm >> 8) & 0xFF])
     params += bytes([0xC8])
@@ -287,14 +288,18 @@ RGB_COLOR_MULTI = 0x0A      # 彩色
 
 
 def set_rgb_effect(mode: int, speed: int, brightness: int,
-                   color_mode: int, rgb: tuple[int, int, int]) -> bytes:
+                   color_mode: int, rgb: tuple[int, int, int],
+                   color_option: int | None = None) -> bytes:
     """完整灯效写入: [A5][0C][12][模式][速度16LE][亮度][单彩][R][G][B][CK]。
     speed = 周期 ms (官方滑条范围 1000~5000, 左慢右快); brightness 0~100;
     color_mode 01=单色 0a=彩色; rgb = 色调 (单色模式下的颜色)。
     ⚠️ 音频同步(0x07)需要配套 0x15 电平流, GUI 暂不提供该模式。"""
     r, g, b = rgb
-    params = bytes([mode & 0xFF, speed & 0xFF, (speed >> 8) & 0xFF,
-                    max(0, min(100, int(brightness))) & 0xFF,
+    mode_b = mode & 0x0F if color_option is None else ((int(color_option) & 0x0F) << 4) | (mode & 0x0F)
+    # payload[0] 高 4 位 = 配色选项序号 (0 彩虹/1 蓝紫追逐/2 黄绿/3 红蓝/4 橙紫,
+    # 仅彩色流动槽位 1 生效); 低 4 位 = 模式槽位 (PIut02 DLL 静态分析)
+    params = bytes([mode_b & 0xFF, speed & 0xFF, (speed >> 8) & 0xFF,
+                    max(10, min(100, int(brightness))) & 0xFF,
                     color_mode & 0xFF, r & 0xFF, g & 0xFF, b & 0xFF])
     return build_frame(Cmd.SET_RGB_EFFECTS, params)
 

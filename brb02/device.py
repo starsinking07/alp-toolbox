@@ -223,7 +223,7 @@ class Brb02Device:
         return True
 
     # ---- 控制 ----
-    def set_fixed_rpm(self, rpm: int, level: int | None = None):
+    def set_fixed_rpm(self, rpm: int, level: int | None = None, src: int | None = None):
         """设置固定转速 (0..4800)。
         level=None 时按转速自动选档 (>2800 → 档位 4);
         也可显式指定 1-4 (档位自动切换模式下由引擎传入)。"""
@@ -231,7 +231,7 @@ class Brb02Device:
         if level is None:
             level = 4 if rpm > 2800 else 1
         level = max(1, min(4, int(level)))
-        self._send(protocol.set_cooling_fixed(rpm, level=level), wait_s=0.3)
+        self._send(protocol.set_cooling_fixed(rpm, level=level, src=src), wait_s=0.3)
 
     def set_curve(self, anchors):
         """写入智能变频曲线 (4 锚点)。⚠️ 只允许写入来自 get_curve 的合法值。
@@ -357,7 +357,8 @@ class Brb02Device:
     def upload_image(self, path: str, heartbeats=None, progress_cb=None,
                      cancel_event=None, flip_h: bool = False,
                      flip_v: bool = False, fit: str = 'stretch',
-                     base_ms: float | None = None) -> dict:
+                     base_ms: float | None = None,
+                     flow_control: bool = False) -> dict:
         """上传**图片文件**到散热器屏幕 (解码为画布后委托 upload_canvas)。
 
         path         : PNG/JPG 图片路径
@@ -384,18 +385,21 @@ class Brb02Device:
                 return self._upload_fail(f'画布长度必须 {su.CANVAS_BYTES}, 实际 {len(data)}')
             return self.upload_canvas(data, heartbeats=heartbeats, progress_cb=progress_cb,
                                       cancel_event=cancel_event, flip_h=flip_h,
-                                      flip_v=flip_v, base_ms=base_ms)
+                                      flip_v=flip_v, base_ms=base_ms,
+                                      flow_control=flow_control)
         try:
             data = su.image_to_rgb565_be(path, fit=fit)
         except Exception as e:
             return self._upload_fail(f'图片解码失败: {e}')
         return self.upload_canvas(data, heartbeats=heartbeats, progress_cb=progress_cb,
                                   cancel_event=cancel_event, flip_h=flip_h,
-                                  flip_v=flip_v, base_ms=base_ms)
+                                  flip_v=flip_v, base_ms=base_ms,
+                                  flow_control=flow_control)
 
     def upload_canvas(self, canvas_bytes: bytes, heartbeats=None, progress_cb=None,
                       cancel_event=None, flip_h: bool = False, flip_v: bool = False,
-                      base_ms: float | None = None) -> dict:
+                      base_ms: float | None = None,
+                      flow_control: bool = False) -> dict:
         """上传一张 **428×142 RGB565 大端画布** (121,552B) 到屏幕。
 
         移植自 tools/replay_upload24_builder.py (v24 设备全绿): C4 → 等真实 ACK →
@@ -498,7 +502,19 @@ class Brb02Device:
                 since = time.time() - last_w
                 if since < 0.005:
                     time.sleep(0.005 - since)
-                if (n - 1) in pauses:
+                if flow_control:
+                    # 0xC6 流控模式 (PIut02 实践): 每包等待设备主动回的流控帧再发
+                    # 下一包, 节奏完全顺应设备 (页刷写/消化慢时自然等待) —— 永不 0x0C。
+                    # 代价: 总时长 ~34s (节拍式 ~16.8s)。
+                    fc_deadline = time.time() + 10.0
+                    while c6n[0] < n - 1 and time.time() < fc_deadline:
+                        if cancel_event is not None and cancel_event.is_set():
+                            canceled = True
+                            break
+                        time.sleep(0.002)
+                    if canceled:
+                        break
+                elif (n - 1) in pauses:
                     # 页首块门控 (2026-10-06 诊断包案): 级联失败的首拒块全部精确落在
                     # 页边界首块 (#1201×3 / #354×1, 与 v3.23 案签名相同 —— 当年判
                     # "非页边界"系 71 块网格误算): 设备页刷写偶发 >40ms 固定停顿,

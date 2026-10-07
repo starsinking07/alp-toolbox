@@ -80,6 +80,9 @@ class Config:
     # 与通电自启 (散热器接入电源自动开机) —— 每次连接成功后经 0x02 下发 (同官方会话开场)。
     device_smart_startstop: bool = False
     device_power_on: bool = True          # 官方默认 = 通电自启开
+    # 上传稳定模式 (0.1.8): 开启后图片上传走 0xC6 流控 (每包等设备流控帧, ~34s/张,
+    # 永不 0x0C); 关闭 = 节拍式 (~16.8s, 失败自动重传且重传自动回落流控)。
+    upload_stable: bool = False
     # 屏幕参数页显示配置 (0.1.8): 0xC2 SetLcdShowPos 三格的参数 id (最多 3,
     # 顺序=屏幕左右)。默认 [0, 1, 7] = CPU温度/GPU温度/时间 (官方默认)。
     # 可选 id 见 protocol.LCD_PARAM_DEFS。设备槽位/几何随此命令配置。

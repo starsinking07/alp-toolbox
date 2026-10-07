@@ -78,6 +78,7 @@ class DeviceWorker(QThread):
     uploadFinished = Signal(dict)          # 上传结束 (结果 dict, 见 device.upload_canvas)
     uploadCountChanged = Signal(int)       # 磨损计数变化 (累计成功上屏次数, 0.1.9)
     screenReadFinished = Signal(dict)      # 屏图读回结束 (0.1.8 历史图片备份)
+    audioSyncError = Signal(str)           # 音频同步异常提示 (0.1.8)
     deviceSwitchesChanged = Signal(dict)   # 设备端开关回读确认 (智能启停/通电自启)
     deviceGearChanged = Signal(int, int)   # 散热器实体按钮换档 (level, rpm) — 0x25 轮询检测
 
@@ -105,6 +106,8 @@ class DeviceWorker(QThread):
         self._last_scene_key = None
         self._temp_wall_active = False        # 温度墙激活态 (0.1.9)
         self._read_req = False                # 屏图读回请求 (0.1.8)
+        self._audio_pusher = None             # 音频同步电平源 (0.1.8)
+        self._keypress_pusher = None          # 按键事件源 (0.1.8)
         self._scene_applied_key = None        # 场景应用态 (('p',idx)/('none',proc))
         self._scene_saved = None              # 进入场景前快照 (0.1.9)
         self._scene_rpm_applied = False     # 情景转速已下发 (规则清空后需恢复, 审计 G11)
@@ -165,6 +168,10 @@ class DeviceWorker(QThread):
                 except Exception:
                     pass
                 self.msleep(1000)
+        try:
+            self.stop_light_effects()
+        except Exception:
+            pass
         try:
             self.device.disconnect()
         except Exception:
@@ -441,7 +448,7 @@ class DeviceWorker(QThread):
         if self._last_sent_rpm is None or stop_now or \
            abs(rpm - self._last_sent_rpm) >= hyst or due or \
            (self.config.tec_auto_enabled and level != self._last_tec_sent):
-            self.device.set_fixed_rpm(rpm, level=level)
+            self.device.set_fixed_rpm(rpm, level=level, src=getattr(self, '_cooling_src', None))
             self._last_host_0x24_ts = time.time()   # 主机 0x24 (区分设备按钮变更)
             self._last_sent_rpm = rpm
             self._last_send_ts = now
@@ -462,7 +469,7 @@ class DeviceWorker(QThread):
             LOGBUF.write(f'[档位] 设备未连接, 已记忆目标 {mem} RPM (L{level}) —— 重连后自动恢复')
             return
         try:
-            self.device.set_fixed_rpm(mem, level=level)
+            self.device.set_fixed_rpm(mem, level=level, src=getattr(self, '_cooling_src', None))
             self._last_sent_rpm = mem
             self._last_tec_sent = level
             self._last_host_0x24_ts = now
@@ -493,7 +500,7 @@ class DeviceWorker(QThread):
             self._last_tec_change_ts = now   # 换档 = 设备写曲线 flash; 屏幕上屏需避让
             rpm_now = self._last_sent_rpm or cfg.fixed_rpm or 0
             try:
-                self.device.set_fixed_rpm(rpm_now, level=lvl)
+                self.device.set_fixed_rpm(rpm_now, level=lvl, src=getattr(self, '_cooling_src', None))
                 self._last_tec_sent = lvl
                 self._last_host_0x24_ts = now   # 主机直发换档, 防 0x25 轮询误判成设备按钮 (审计 G5)
             except Exception as e:
@@ -602,6 +609,68 @@ class DeviceWorker(QThread):
         cfg.device_power_on = bool(power_on)
         cfg.save()
         self.push_device_switches()
+
+    # ---- 灯效联动流 (0.1.8): 音频同步 0x15 / 响应按键 0x16 ----
+    def apply_light_mode_effects(self, mode: int):
+        """按灯效模式起停联动流: 音频同步 (槽位 7) → 0x15 电平推送;
+        响应 (槽位 6) → 0x16 按键事件。其他模式两者皆停。"""
+        from .protocol import RGB_MODE_AUDIO, RGB_MODE_REACTIVE
+        if mode == RGB_MODE_AUDIO:
+            self._stop_keypress()
+            self._start_audio()
+        elif mode == RGB_MODE_REACTIVE:
+            self._stop_audio()
+            self._start_keypress()
+        else:
+            self._stop_audio()
+            self._stop_keypress()
+
+    def _start_audio(self):
+        from .logbuf import LOGBUF
+        if self._audio_pusher is not None:
+            return
+        from .audio_sync import AudioLevelPusher
+
+        def cb(level):
+            if self.device.connected and not self._uploading:
+                self.device._send(protocol.build_frame(0x15, bytes([level & 0xFF])))
+
+        self._audio_pusher = AudioLevelPusher(cb, log=lambda s: LOGBUF.write(s))
+        self._audio_pusher.start()
+        LOGBUF.write('[灯效] 音频同步电平推送已启动 (0x15)')
+
+    def _stop_audio(self):
+        if self._audio_pusher is not None:
+            self._audio_pusher.stop()
+            self._audio_pusher = None
+            from .logbuf import LOGBUF
+            LOGBUF.write('[灯效] 音频同步电平推送已停止')
+
+    def _start_keypress(self):
+        from .logbuf import LOGBUF
+        if self._keypress_pusher is not None:
+            return
+        from .keypress_sync import KeyPressPusher
+
+        def cb():
+            if self.device.connected and not self._uploading:
+                self.device._send(protocol.build_frame(0x16))
+
+        self._keypress_pusher = KeyPressPusher(cb, log=lambda s: LOGBUF.write(s))
+        self._keypress_pusher.start()
+        LOGBUF.write('[灯效] 按键事件推送已启动 (0x16, 响应灯效)')
+
+    def _stop_keypress(self):
+        if self._keypress_pusher is not None:
+            self._keypress_pusher.stop()
+            self._keypress_pusher = None
+            from .logbuf import LOGBUF
+            LOGBUF.write('[灯效] 按键事件推送已停止')
+
+    def stop_light_effects(self):
+        """断开/退出时停止全部联动流。"""
+        self._stop_audio()
+        self._stop_keypress()
 
     def send_param_page_config(self):
         """下发 0xC2 SetLcdShowPos (参数页三格显示配置), 等 ACK 记日志。
@@ -914,6 +983,7 @@ class DeviceWorker(QThread):
         lvl, rpm = cur.get('on'), cur.get('rpm')
         if lvl is None or rpm is None:
             return
+        self._cooling_src = cur.get('mode')     # 0x24 byte[0] 参照源原样保留 (PIut02 实践)
         # 回读与工具箱意图一致 (= 刚下发的回声) → 不是按钮变更
         same_as_sent = (self._last_sent_rpm is not None
                         and abs((rpm or 0) - self._last_sent_rpm) <= 60)
@@ -1113,7 +1183,7 @@ class DeviceWorker(QThread):
         try:
             rpm = int(prof.get('rpm', 0) or 0)
             if rpm > 0:
-                self.device.set_fixed_rpm(rpm)
+                self.device.set_fixed_rpm(rpm, src=getattr(self, '_cooling_src', None))
                 self._last_sent_rpm = rpm
                 self._last_host_0x24_ts = time.time()
                 self._manual_until = time.time() + 10
@@ -1245,7 +1315,7 @@ class DeviceWorker(QThread):
         # (此前 level=None 走设备层二值映射 >2800→L4, L2/L3 永远发不出来, v3.65)
         level = 4 if rpm >= 3800 else 3 if rpm >= 3000 else 2 if rpm >= 2400 else 1
         try:
-            self.device.set_fixed_rpm(rpm, level=level)
+            self.device.set_fixed_rpm(rpm, level=level, src=getattr(self, '_cooling_src', None))
         except Exception as e:
             if quiet:
                 return
@@ -1288,12 +1358,13 @@ class DeviceWorker(QThread):
             return None
 
     def set_lighting(self, mode: int, speed: int, brightness: int,
-                     color_mode: int, rgb):
-        """写完整灯效 (GUI 灯效面板)"""
+                     color_mode: int, rgb, color_option: int | None = None):
+        """写完整灯效 (GUI 灯效面板)。color_option: 彩色流动配色序号 0-4 (None=不变)。"""
         if self._uploading:
             return
         try:
-            self.device.set_rgb_effect(mode, speed, brightness, color_mode, rgb)
+            self.device.set_rgb_effect(mode, speed, brightness, color_mode, rgb,
+                                       color_option=color_option)
         except Exception as e:
             from .logbuf import LOGBUF
             LOGBUF.write(f'[灯效] 写入失败: {e}')
