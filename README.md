@@ -70,6 +70,9 @@ python main.py
 - **CPU 温度**需要管理员权限 + [PawnIO](https://github.com/hirschmann/pawnio) 驱动;
   无提权时自动降级显示 GPU 温度。
 - 打包:`pip install pyinstaller && pyinstaller --clean -y Alp.spec`
+- 离线自检(不碰设备,改动 GUI / 控制逻辑后建议跑一遍):
+  `python tests/check_ui_wiring.py`(UI 接线断言,需要 PySide6)与
+  `python tests/test_v018_features.py`(情景配置 + 温度墙引擎)
 
 ## 硬件协议
 
