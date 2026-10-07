@@ -1850,7 +1850,7 @@ class ControlPage(QWidget):
         try:
             import winreg
             winreg.QueryValueEx(winreg.OpenKey(
-                winreg.HKCU, r'Software\Microsoft\Windows\CurrentVersion\Run'),
+                winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Run'),
                 'Brb02Toolbox')
             return True
         except Exception:
@@ -1866,7 +1866,7 @@ class ControlPage(QWidget):
     def _autostart_legacy_run_clear(self):
         try:
             import winreg
-            k = winreg.OpenKey(winreg.HKCU,
+            k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                r'Software\Microsoft\Windows\CurrentVersion\Run',
                                0, winreg.KEY_SET_VALUE)
             try:
