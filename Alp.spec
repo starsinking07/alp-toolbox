@@ -21,7 +21,7 @@ else:
     # 静默跳过会导致成品 CPU 温度永远显示 "--", 必须让构建直接失败
     raise SystemExit('LHM dll 缺失: LHM/LibreHardwareMonitorLib.dll')
 
-hiddenimports = []
+hiddenimports = ['pyaudiowpatch', 'pynput']   # 音频同步/响应灯效 (动态 import 于 audio_sync/keypress_sync)
 for pkg in ('libusb_package', 'bleak'):
     d, b, h = collect_all(pkg)
     datas += d
