@@ -1675,14 +1675,17 @@ class ControlPage(QWidget):
         self.ctx['cfg'].save()
 
     def _scene_prof_changed(self, i: int, field: str, val):
+        from .logbuf import LOGBUF
         cfg = self.ctx['cfg']
         try:
             profs = cfg.scene_profiles
             if 0 <= i < len(profs) and isinstance(profs[i], dict):
                 profs[i][field] = val
                 cfg.save()
-        except Exception:
-            pass
+                if field == 'enabled':
+                    LOGBUF.write(f'[情景] 配置{chr(65 + i)} 已{"启用" if val else "停用"}')
+        except Exception as e:
+            LOGBUF.write(f'[情景] 配置保存失败: {e!r}')
 
 
 
