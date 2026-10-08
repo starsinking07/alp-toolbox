@@ -4,6 +4,13 @@
 跑法: python tools/check_ui_wiring.py"""
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# ⚠️ 配置沙箱 (2026-10-08 事故): 自检**不得改写用户真实配置** —— 把 APPDATA 指向临时目录。
+#    本脚本会切换屏幕页"缩放方式"下拉, 而 `_on_fit_changed` 里 `cfg.save()` ⇒ 旧版每次跑自检
+#    都把用户的 `image_fit` 静默改成测试最后停留的值。Config.path() 调用时读 APPDATA, 故此处重定向即可。
+import tempfile as _tf
+_SBX = os.path.join(_tf.gettempdir(), 'brb02_selftest')
+os.makedirs(os.path.join(_SBX, 'Brb02Toolbox'), exist_ok=True)
+os.environ['APPDATA'] = _SBX                      # 必须在 brb02.config 导入之前
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtWidgets import QApplication, QPushButton, QComboBox, QSlider, QSpinBox, QCheckBox
 from PySide6.QtCore import Signal, QObject
@@ -84,12 +91,18 @@ print('=== ScreenPage ===')
 from brb02.gui.pages import ScreenPage
 sp = ScreenPage(dict(ctx))
 check('缩放/平移滑条', all(hasattr(sp, a) for a in ('sld_zoom', 'sld_panx', 'sld_pany')))
-check(f"初始 fit={sp._fit} 滑条态与之一致",
-      sp.sld_zoom.isEnabled() == (sp._fit == 'cover'))
+check(f"初始 fit={sp._fit} 三个滑条态与之一致",
+      all(s.isEnabled() == (sp._fit == 'cover')
+          for s in (sp.sld_zoom, sp.sld_panx, sp.sld_pany)))
 sp.fit_combo.setCurrentIndex(max(0, sp.fit_combo.findData('stretch')))
-check('切 stretch → 禁用', not sp.sld_zoom.isEnabled())
+check('切 stretch → 三个滑条全部禁用 (仅 cover 模式可用)',
+      not any(s.isEnabled() for s in (sp.sld_zoom, sp.sld_panx, sp.sld_pany)))
+check('stretch 下给出原因提示 (不再"滑不动"却无说明)',
+      '等比裁边' in sp.lbl_zoom_hint.text())
 sp.fit_combo.setCurrentIndex(max(0, sp.fit_combo.findData('cover')))
-check('切 cover → 启用', sp.sld_zoom.isEnabled())
+check('切 cover → 三个滑条全部启用',
+      all(s.isEnabled() for s in (sp.sld_zoom, sp.sld_panx, sp.sld_pany)))
+check('cover 下提示切换为可用态', '等比裁边' not in sp.lbl_zoom_hint.text())
 check('备份按钮', hasattr(sp, 'btn_read') or any('备份当前屏图' in b.text() for b in sp.findChildren(QPushButton)))
 
 # --- 屏幕开关 0xC0/0xC1 (2026-10-08 接入 GUI) ---

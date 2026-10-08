@@ -3,6 +3,11 @@
 跑法: python tools/test_v018_features.py"""
 import sys, os, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# ⚠️ 配置沙箱 (2026-10-08 事故): 自检不得改写用户真实配置 —— 把 APPDATA 指向临时目录。
+import tempfile as _tf
+_SBX = os.path.join(_tf.gettempdir(), 'brb02_selftest')
+os.makedirs(os.path.join(_SBX, 'Brb02Toolbox'), exist_ok=True)
+os.environ['APPDATA'] = _SBX                      # 必须在 brb02.config 导入之前
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 FAILS = []

@@ -2509,7 +2509,11 @@ class ScreenPage(QWidget):
         self.sld_pany.valueChanged.connect(self._zoom_pan_changed)
         prow2.addWidget(self.sld_pany, 1)
         zv.addLayout(prow2)
-        self._sync_zoom_enabled()
+        self.lbl_zoom_hint = QLabel('')
+        self.lbl_zoom_hint.setObjectName('CardHint')
+        self.lbl_zoom_hint.setWordWrap(True)
+        zv.addWidget(self.lbl_zoom_hint)
+        self._sync_zoom_enabled()            # 放在提示标签之后: 初始为 stretch 时也要出提示
         v.addWidget(zoom_card)
 
         row = QHBoxLayout()
@@ -2723,9 +2727,19 @@ class ScreenPage(QWidget):
         self._render_preview()
 
     def _sync_zoom_enabled(self):
+        """缩放/平移**仅在「等比裁边」(cover) 下生效** —— 拉伸铺满时三个滑条禁用, 并给出原因。
+
+        ⚠️ 2026-10-08 修复: 此前只禁用不解释, 用户看到滑条"滑不动"以为是坏了;
+        且 QSS 缺 `:disabled` 规则 ⇒ 禁用态仍是主色蓝, 看起来像可用 (用户截图)。
+        """
         en = self._fit == 'cover'
         for s in (self.sld_zoom, self.sld_panx, self.sld_pany):
             s.setEnabled(en)
+        if hasattr(self, 'lbl_zoom_hint'):
+            self.lbl_zoom_hint.setText(
+                '' if en else
+                '⚠️ 当前是「拉伸铺满」—— 缩放与平移只在「等比裁边」模式下生效。'
+                '要放大/移动画面, 请在上方"缩放方式"里切到等比裁边。')
 
     def _on_fit_changed(self, _idx):
         try:

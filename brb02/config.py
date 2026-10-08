@@ -133,7 +133,12 @@ class Config:
                 LOGBUF.write('[config] 配置加载失败, 已改用默认值 (原文件保留为 *.corrupt.bak)')
             except Exception:
                 pass
-            return cls()
+            # ⚠️ 2026-10-08 修复: 旧版直接 `return cls()` —— **跳过了 _normalize()**,
+            # 于是"首次运行 (还没有配置文件)"与"配置文件损坏"两种情况都会拿到未归一化的配置
+            # (最直观: scene_profiles 为空, 情景编辑器显示 0 槽而不是 4 槽)。
+            cfg = cls()
+            cfg._normalize()
+            return cfg
 
     def _normalize(self) -> None:
         """旧配置/手改 JSON 的容错归一: 非法值回默认, 结构修正 (防延迟爆炸)。"""

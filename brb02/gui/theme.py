@@ -213,6 +213,13 @@ QSlider::handle:horizontal {{
     width: 18px; height: 18px; margin: -6px 0; border-radius: 9px;
     background: {t['primary']}; border: 2px solid {t['card']};
 }}
+/* 禁用态 (2026-10-08): 此前无此规则 ⇒ 被禁用的滑条仍是主色蓝, 看起来像可用 ——
+   屏幕图片页"缩放与位置"在「拉伸铺满」下禁用时尤其误导 (用户以为滑条坏了)。 */
+QSlider::sub-page:horizontal:disabled {{ background: {t['muted']}; border-radius: 4px; }}
+QSlider::handle:horizontal:disabled {{
+    width: 18px; height: 18px; margin: -6px 0; border-radius: 9px;
+    background: {t['muted_fg']}; border: 2px solid {t['card']};
+}}
 
 /* ---- 输入控件: 无边框灰底 (分数 DPI 下无边框=无伪影), 聚焦主色描边 ---- */
 QComboBox, QSpinBox, QLineEdit {{
