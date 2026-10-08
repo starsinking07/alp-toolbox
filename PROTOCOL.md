@@ -640,7 +640,7 @@ A4 30 01 00 C6 [42B 数据] [CK@47]     然后线上补零到 64B
 
 ## 11. 与 FanControlPortable 的交叉核对 (2026-10-08)
 
-> 完整版笔记: `D:\ZCodeFiles\ref-repo\FanControlPortable_BRB02_交叉核对.md`;>   
+> 完整版笔记: `FanControlPortable_BRB02_交叉核对.md` (交叉核对工作笔记);>   
 > 源码副本: `ref-repo\_remote_Eureka\` (上游) 与 `ref-repo\_remote_PIut02\` (朋友 fork)。
 
 ### 11.1 两个参照仓库
