@@ -508,8 +508,18 @@ class MainWindow(QMainWindow):
         self._curve_cache = None
 
     def curve_pct(self):
+        """曲线 → **19 点**百分比, 与曲线编辑器**同一重采样** (`CurveEditor.resample_pairs`)。
+
+        ⚠️ 2026-10-08 修复: 旧实现直接 `[round(rpm/4800*100) for (t,rpm) in cfg.curve]` ——
+        当 `cfg.curve` 少于 19 点 (默认曲线 / 曲线方案预设就是 4 个锚点) 时只返回 4 个值,
+        状态页的 `set_curve` 只好用最后一个值补满 19 点 ⇒ **图形被压扁在前 4 个温度点
+        (20/25/30/35°C) 之后一路拉平**, 与曲线页画的不是同一条曲线 (用户截图实测:
+        4 锚点 `[[40,2000],[60,3000],[80,4000],[90,4500]]` → 状态页 `[42,62,83,94,94,…]`,
+        曲线页 `[42,42,42,42,42,47,…,94]`)。改为复用编辑器的线性插值, 两处显示从此一致。
+        """
         if self._curve_cache is None:
-            self._curve_cache = [min(100, round(c[1] / MAX_RPM * 100)) for c in self.cfg.curve]
+            from .curve_editor import CurveEditor      # 延迟导入, 避免与 pages 的导入环
+            self._curve_cache = CurveEditor.resample_pairs(self.cfg.curve, MAX_RPM)
         return self._curve_cache
 
     def _ui_heartbeat(self):

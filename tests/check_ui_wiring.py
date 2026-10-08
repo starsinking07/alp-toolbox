@@ -231,6 +231,29 @@ check('Brb02Device 提供 set/get_lcd_switch_status',
       all(hasattr(__import__('brb02.device', fromlist=['Brb02Device']).Brb02Device, m)
           for m in ('set_lcd_switch', 'get_lcd_switch_status')))
 
+# ===== 状态页 vs 曲线页: 必须是同一条曲线 (2026-10-08 修复"压扁"bug) =====
+print('=== 曲线显示一致性 (状态页 vs 曲线页) ===')
+from brb02.gui.curve_editor import CurveEditor as _CE
+_C4 = [[40, 2000], [60, 3000], [80, 4000], [90, 4500]]      # 默认/方案预设就是 4 个锚点
+_exp = _CE.resample_pairs(_C4, 4800)
+check('resample_pairs(4 锚点) → 19 点 (首 42 / 末 94)',
+      len(_exp) == 19 and _exp[0] == 42 and _exp[-1] == 94)
+try:
+    from brb02.gui.main_window import MainWindow as _MW
+    class _MC:
+        curve = _C4
+    class _MO:
+        _curve_cache = None
+        cfg = _MC()
+    _got = _MW.curve_pct(_MO())
+    check('MainWindow.curve_pct() 返回 19 点重采样 (旧实现只给 4 点 → 压扁)',
+          _got == _exp)
+    _a = _CE(rpm_axis=True); _a.set_curve(_got)
+    _b = _CE(); _b.set_curve(_C4)
+    check('状态页曲线 == 曲线页曲线', _a.pct == _b.pct)
+except Exception as _e:
+    print(f'  [SKIP] main_window 不可导入 ({_e})')
+
 # ===== USB 读超时判定 (2026-10-08 修复: 旧判据对 USBTimeoutError 全失效) =====
 print('=== USB 读超时判定 ===')
 from brb02.device import _is_read_timeout
