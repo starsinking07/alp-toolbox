@@ -98,6 +98,10 @@ class Config:
     # 挡位预设
     presets: dict = field(default_factory=lambda: dict(DEFAULT_PRESETS))
     autostart_minimized: bool = False
+    # 灯效模式编码语义版本: 1 = 旧 (0x06=刷新 / 0x08=响应 —— 实为标反);
+    # 2 = 定案 (0x06=响应 / 0x08=刷新, 见 PROTOCOL.md §11.4 D2)。
+    # 载入旧配置时把场景方案里存的 light_mode 6/8 互换一次, 然后打版本号防重复迁移。
+    light_mode_enc: int = 1
 
     # ---- IO ----
     @classmethod
@@ -208,6 +212,23 @@ class Config:
                 'enabled': False, 'rpm': 0, 'scheme': '', 'light_mode': -1,
                 'processes': []})
         del self.scene_profiles[4:]
+        # 灯效模式语义迁移 (v0.1.9): 旧配置里 0x06/0x08 的"响应/刷新"标反了,
+        # 场景方案存的 light_mode 若是 6 或 8 需互换一次 (仅此一次, 用版本号兜住)。
+        try:
+            if int(getattr(self, 'light_mode_enc', 1) or 1) < 2:
+                _swap = {6: 8, 8: 6}
+                for _p in self.scene_profiles:
+                    if not isinstance(_p, dict):
+                        continue
+                    try:
+                        _lm = int(_p.get('light_mode', -1))
+                    except (TypeError, ValueError):
+                        continue
+                    if _lm in _swap:
+                        _p['light_mode'] = _swap[_lm]
+                self.light_mode_enc = 2
+        except Exception:
+            pass
         if not isinstance(self.presets, dict):
             self.presets = {}
         if self.conn_type not in ('usb', 'ble'):

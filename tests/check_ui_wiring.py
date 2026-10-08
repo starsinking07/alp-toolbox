@@ -41,6 +41,9 @@ class _W(QObject):
     def start_image_upload(self, *a, **k): pass
     def start_screen_read(self): return True
     def send_param_page_config(self): pass
+    def read_param_page_layout(self): return None
+    def set_lcd_switch(self, on): self._lcd = bool(on); return bool(on)
+    def get_lcd_switch_status(self): return True
 
 cfg = Config.load(); cfg.dark = False
 ctx = {'cfg': cfg, 'worker': _W(), 'dark': False,
@@ -75,6 +78,31 @@ check('切 stretch → 禁用', not sp.sld_zoom.isEnabled())
 sp.fit_combo.setCurrentIndex(max(0, sp.fit_combo.findData('cover')))
 check('切 cover → 启用', sp.sld_zoom.isEnabled())
 check('备份按钮', hasattr(sp, 'btn_read') or any('备份当前屏图' in b.text() for b in sp.findChildren(QPushButton)))
+
+# --- 屏幕开关 0xC0/0xC1 (2026-10-08 接入 GUI) ---
+check('屏幕开关: 开关控件 + 状态标签', hasattr(sp, 'tgl_screen') and hasattr(sp, 'lbl_screen'))
+check('屏幕开关: 回填函数存在', hasattr(sp, '_refresh_screen_switch'))
+sp._refresh_screen_switch()
+check('屏幕开关: 连接后回读回填 (stub=True)',
+      sp.tgl_screen.isChecked() is True and '开启' in sp.lbl_screen.text())
+sp.tgl_screen.setChecked(False)              # 模拟用户拨动 (真实路径: mousePressEvent 先翻再回调)
+sp._screen_switch_changed(False)
+check('屏幕开关: 关屏后标签跟随',
+      sp.tgl_screen.isChecked() is False and '关闭' in sp.lbl_screen.text())
+sp.tgl_screen.setChecked(True)
+sp._screen_switch_changed(True)
+check('屏幕开关: 开屏后标签跟随',
+      sp.tgl_screen.isChecked() is True and '开启' in sp.lbl_screen.text())
+# 失败路径: 写未确认 (回读为 None) → 必须回滚 UI 到设备真实态, 不能停在假状态
+_ow = sp.ctx['worker']
+_oset, _oget = _ow.set_lcd_switch, _ow.get_lcd_switch_status
+_ow.set_lcd_switch = lambda on: None          # 模拟写/回读未确认
+_ow.get_lcd_switch_status = lambda: True      # 设备真实态 = 开
+sp.tgl_screen.setChecked(False)
+sp._screen_switch_changed(False)
+check('屏幕开关: 未确认时回滚 UI 到设备真实态',
+      sp.tgl_screen.isChecked() is True and '未生效' in sp.lbl_screen.text())
+_ow.set_lcd_switch, _ow.get_lcd_switch_status = _oset, _oget
 if sp.hist_list is None:
     # 官方装备箱画布缓存目录 (C:\ProgramData\BlackSharkEquipmentBox\Brb02Image) 不存在
     # 时历史图卡整体不建 — 条件功能, 跳过而非失败 (公共仓库/未装官方软件的机器可移植)
@@ -87,15 +115,22 @@ else:
 # ===== 模式互斥联动 =====
 print('=== 灯效联动流 ===')
 from brb02.service import DeviceWorker
+from brb02 import protocol as _p
+check('响应常量 = 0x06 (固件 0x16 门控值)', _p.RGB_MODE_REACTIVE == 0x06)
+check('刷新常量 = 0x08', _p.RGB_MODE_REFRESH == 0x08)
+check('音频常量 = 0x07', _p.RGB_MODE_AUDIO == 0x07)
 w2 = DeviceWorker.__new__(DeviceWorker)
 w2.device = _D(); w2.config = cfg
 w2._audio_pusher = None; w2._keypress_pusher = None
 w2._uploading = False; w2._upload_cancel = __import__('threading').Event()
-w2.apply_light_mode_effects(0x07)
+w2.apply_light_mode_effects(_p.RGB_MODE_AUDIO)
 check('音频同步 → 0x15 源启动', w2._audio_pusher is not None)
-w2.apply_light_mode_effects(0x08)
-check('响应 → 音频停/按键源启动', w2._audio_pusher is None and w2._keypress_pusher is not None)
-w2.apply_light_mode_effects(0x04)
+w2.apply_light_mode_effects(_p.RGB_MODE_REACTIVE)
+check('响应(0x06) → 音频停/按键源启动', w2._audio_pusher is None and w2._keypress_pusher is not None)
+w2.apply_light_mode_effects(_p.RGB_MODE_REFRESH)
+check('刷新(0x08) → 两者皆停 (不误启按键源)',
+      w2._audio_pusher is None and w2._keypress_pusher is None)
+w2.apply_light_mode_effects(_p.RGB_MODE_STEADY)
 check('其他模式全停', w2._audio_pusher is None and w2._keypress_pusher is None)
 
 # ===== 温度墙引擎 =====
@@ -150,6 +185,64 @@ check('ID02=CPU 负载', e.get(0x02) == 1)
 check('ID03=GPU 负载', e.get(0x03) == 2)
 check('ID05=磁盘占用', e.get(0x05) == 3)
 check('ID06=内存占用', e.get(0x06) == 6)
+
+# ===== 参数页 0xC3 读回 (2026-10-08 功能化) =====
+print('=== 参数页 0xC3 读回 ===')
+from brb02 import protocol as _pc
+check('get_lcd_show_pos 短形态 A5 03 C3 6B', _pc.get_lcd_show_pos() == bytes.fromhex('A503C36B'))
+_rb = _pc.parse_lcd_show_pos(bytes.fromhex('000003006E006801D7006807260168'))
+check('parse_lcd_show_pos id=[0,1,7]', bool(_rb) and [it[0] for it in _rb['items']] == [0, 1, 7])
+check('DeviceWorker.read_param_page_layout 存在', hasattr(DeviceWorker, 'read_param_page_layout'))
+check('参数页对话框读取按钮', any('从设备读取' in b.text() for b in cp.findChildren(QPushButton))
+      or '从设备读取当前布局' in open(os.path.join(
+          os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+          'brb02', 'gui', 'pages.py'), encoding='utf-8').read())
+
+# ===== 0x26 档位配置读 (2026-10-08 修复: 旧帧多塞 slot 字节 → 被固件忽略) =====
+print('=== 0x26 档位配置读 ===')
+check('get_any_cooling(1) 帧形 = A5 06 26 01 01 D3',
+      _pc.get_any_cooling(1) == bytes.fromhex('A506260101D3'))
+check('get_any_cooling(3, form=0) = A5 06 26 00 03 D4',
+      _pc.get_any_cooling(3, 0) == bytes.fromhex('A506260003D4'))
+check('越界档位被夹到 1..4',
+      _pc.get_any_cooling(9) == _pc.get_any_cooling(4)
+      and _pc.get_any_cooling(0) == _pc.get_any_cooling(1))
+_cur = _pc.parse_cur_cooling(bytes.fromhex('0000014006A8'))
+check('parse_cur_cooling 暴露 src/form/level',
+      bool(_cur) and (_cur['src'], _cur['form'], _cur['level']) == (0, 0, 1)
+      and _cur['rpm'] == 1600)
+check('parse_cur_cooling 旧键名仍兼容 (mode/on)',
+      _cur['mode'] == _cur['src'] and _cur['on'] == _cur['level'])
+_cv = _pc.parse_curve(bytes.fromhex('00010114B00428E8053C560850C40AC8'))
+check('parse_curve 对 16B 真机应答 → 4 锚点',
+      _cv == [(20, 1200), (40, 1512), (60, 2134), (80, 2756)])
+
+# ===== 0xC0/0xC1 屏开关 (2026-10-08 固件全解 + 真机验证) =====
+print('=== 0xC0/0xC1 屏开关 ===')
+check('set_lcd_switch(关) 帧形 = A5 05 C0 00 6A (官方实帧)',
+      _pc.set_lcd_switch(False) == bytes.fromhex('A505C0006A'))
+check('set_lcd_switch(开) 帧形 = A5 05 C0 01 6B (官方实帧)',
+      _pc.set_lcd_switch(True) == bytes.fromhex('A505C0016B'))
+check('get_lcd_switch_status 帧形 = A5 04 C1 6A (官方实帧)',
+      _pc.get_lcd_switch_status() == bytes.fromhex('A504C16A'))
+check('Cmd.SET_LCD_SWITCH = 0xC0 且 ≠ GET(0xC1)',
+      _pc.Cmd.SET_LCD_SWITCH == 0xC0 and _pc.Cmd.GET_LCD_SWITCH_STATUS == 0xC1)
+check('Brb02Device 提供 set/get_lcd_switch_status',
+      all(hasattr(__import__('brb02.device', fromlist=['Brb02Device']).Brb02Device, m)
+          for m in ('set_lcd_switch', 'get_lcd_switch_status')))
+
+# ===== USB 读超时判定 (2026-10-08 修复: 旧判据对 USBTimeoutError 全失效) =====
+print('=== USB 读超时判定 ===')
+from brb02.device import _is_read_timeout
+try:
+    import usb.core as _uc
+    _te = _uc.USBTimeoutError(10060, 'Operation timed out')
+    check('USBTimeoutError 判为超时 (poll_report 依赖)', _is_read_timeout(_te))
+except Exception as _e:
+    print(f'  [SKIP] pyusb 不可用 ({_e})')
+check('TimeoutError 判为超时', _is_read_timeout(TimeoutError()))
+check('普通异常不判为超时 (否则会吞掉真错误)',
+      not _is_read_timeout(ValueError('boom')) and not _is_read_timeout(OSError('io')))
 
 print()
 if FAILS:

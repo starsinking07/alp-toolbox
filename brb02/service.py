@@ -674,19 +674,40 @@ class DeviceWorker(QThread):
         self._stop_keypress()
 
     def send_param_page_config(self):
-        """下发 0xC2 SetLcdShowPos (参数页三格显示配置), 等 ACK 记日志。
+        """下发 0xC2 SetLcdShowPos (参数页三格显示配置), 等 ACK, 再读 0xC3 回读校验。
         时机: 用户在设置里修改后 + 每次连接成功后 (设备端无掉电保存证据,
-        官方每次会话开场也会重推配置类命令)。"""
+        官方每次会话开场也会重推配置类命令)。
+        0xC3 = 0xC2 的读回对 (固件 FUN_1b496 从 0x18860+1 拷 15B 实证) —— 写后回读,
+        **只比 id** (读回几何由设备侧重算, 与写帧默认几何 10/143/276 不同, 勿逐字节比)。"""
         from .logbuf import LOGBUF
         try:
             ids = [int(i) for i in (getattr(self.config, 'param_page_ids', None) or [0, 1, 7])][:3]
             f = protocol.set_lcd_show_pos(ids)
             acks = self.device._send(f)
             ok = any(c == 0xC2 for c, _ in acks)
-            LOGBUF.write(f'[参数页] 显示配置已下发 (id={ids}) '
-                         + ('设备已确认 ✓' if ok else '未收到 ACK (设备可能未就绪)'))
+            msg = (f'[参数页] 显示配置已下发 (id={ids}) '
+                   + ('设备已确认 ✓' if ok else '未收到 ACK (设备可能未就绪)'))
+            try:
+                rb = self.device.get_lcd_show_pos()
+            except Exception:
+                rb = None
+            if rb is not None:
+                rb_ids = [it[0] for it in rb['items']]
+                match = rb_ids[:len(ids)] == ids
+                msg += f'; 0xC3 回读 id={rb_ids} ' + ('一致 ✓' if match else '不一致 ⚠')
+            else:
+                msg += '; 0xC3 回读无应答'
+            LOGBUF.write(msg)
         except Exception as e:
             LOGBUF.write(f'[参数页] 配置下发失败: {e}')
+
+    def read_param_page_layout(self):
+        """读设备当前参数页布局 (0xC3 = 0xC2 的读回对; GUI 对话框用, 阻塞 ~0.5s)。
+        → {'pos','count','items':[(id,x,y)]} 或 None (未连接/无应答)。"""
+        try:
+            return self.device.get_lcd_show_pos()
+        except Exception:
+            return None
 
     def _push_host_info07(self, cpu: float, gpu: float):
         """屏幕参数页推送 (1Hz), 格式/ID 语义见 protocol.build_host_info。"""
@@ -1298,10 +1319,13 @@ class DeviceWorker(QThread):
         self._user_connect = True
 
     def emit_info(self):
+        cur = self.device.get_cur_cooling()
+        # 曲线按**当前档位**读 (0x26 的档位参数): 旧代码恒传 1 → 档位≠1 时读到的是 L1 的曲线。
+        lvl = (cur or {}).get('level') or 1
         info = {
             'firmware': self.device.get_firmware_version(),
-            'cooling': self.device.get_cur_cooling(),
-            'curve': self.device.get_curve(1),
+            'cooling': cur,
+            'curve': self.device.get_curve(lvl),
             'rgb_on': self.device.get_rgb_switch(),
         }
         self.infoChanged.emit(info)
@@ -1335,6 +1359,22 @@ class DeviceWorker(QThread):
         body = bytes([0x04, 0x10, 0x01 if on else 0x00])
         f = bytes([protocol.HEADER]) + body + bytes([protocol.checksum(bytes([protocol.HEADER]) + body)])
         self.device._send(f, wait_s=0.3)
+
+    # ---- 屏幕开关 (0xC0/0xC1, 2026-10-08 固件全解) ----
+    def set_lcd_switch(self, on: bool) -> bool | None:
+        """0xC0 屏开关 (0=关/1=开), 写后用 0xC1 回读确认。
+        返回回读值 (True/False); None = 未执行 (上传中) 或写/回读未确认。
+        上传期间禁用: 图传路径会往屏上画, 中途关屏会打断。"""
+        if self._uploading:
+            return None
+        return self.device.set_lcd_switch(bool(on))
+
+    def get_lcd_switch_status(self) -> bool | None:
+        """0xC1 读屏开关状态 (True=屏开); 未连接/无应答返回 None。"""
+        try:
+            return self.device.get_lcd_switch_status()
+        except Exception:
+            return None
 
     def get_lighting(self):
         """读当前灯效 (GUI 灯效面板初始化用), 未连接/失败返回 None 不刷错误"""

@@ -1715,6 +1715,34 @@ class ControlPage(QWidget):
             row.addWidget(cmb)
             v.addLayout(row)
             combos.append(cmb)
+
+        # 从设备读取当前布局 (0xC3 = 0xC2 的读回对; 固件 FUN_1b496 实证)
+        rd_row = QHBoxLayout()
+        btn_read = QPushButton('从设备读取当前布局')
+        btn_read.setToolTip('读取散热器当前参数页布局 (0xC3 读回), 填入上方三格')
+        lbl_read = QLabel('')
+        lbl_read.setObjectName('CardHint')
+        rd_row.addWidget(btn_read)
+        rd_row.addWidget(lbl_read, 1)
+        v.addLayout(rd_row)
+
+        def _do_read():
+            try:
+                rb = self.ctx['worker'].read_param_page_layout()
+            except Exception:
+                rb = None
+            if not rb or not rb.get('items'):
+                lbl_read.setText('读取失败 (未连接或无应答)')
+                return
+            ids = [it[0] for it in rb['items']]
+            for cmb, pid in zip(combos, ids):
+                idx = cmb.findData(pid)
+                if idx >= 0:
+                    cmb.setCurrentIndex(idx)
+            names = ' / '.join(dict(LCD_PARAM_DEFS).get(p, f'id{p}') for p in ids)
+            lbl_read.setText(f'设备当前: {names}')
+        btn_read.clicked.connect(_do_read)
+
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(dlg.accept)
         bb.rejected.connect(dlg.reject)
@@ -1798,7 +1826,10 @@ class ControlPage(QWidget):
             c.blockSignals(True)
         try:
             mode_raw = eff['mode']
-            idx = {m: i for i, (_, m) in enumerate(self._light_modes)}.get(mode_raw & 0x0F, 2)
+            # 回读按**槽位** (低 nibble) 匹配: 设备回读的是当前槽位 byte0 =
+            # (颜色选项<<4)|槽位(1..8), 高 nibble 是配色选项, 不参与模式判定。
+            # (旧写法以全字节为键 → `0x11 & 0x0F = 1` 落空 → "彩色流动"被错显示成"呼吸"。)
+            idx = {(m & 0x0F): i for i, (_, m) in enumerate(self._light_modes)}.get(mode_raw & 0x0F, 2)
             self.cmb_light_mode.setCurrentIndex(idx)
             if getattr(self, 'cmb_color_opt', None) is not None:
                 co = self.cmb_color_opt.findData((mode_raw >> 4) & 0x0F)
@@ -2507,6 +2538,20 @@ class ScreenPage(QWidget):
         cv.addWidget(self.result)
         v.addWidget(card)
 
+        # --- 屏幕开关 (0xC0/0xC1, 0.1.9): 关屏省电; 官方启动也会 off→on 强制重绘 ---
+        sw_card, _, sv = _card(
+            '屏幕开关',
+            '关闭后散热器屏幕熄灭, 风扇与灯效不受影响; 状态设备侧持久化 (拔电不丢)。'
+            '写入后用 0xC1 回读确认 —— 设备对每条命令都会回 ACK, 但一律以回读为准。')
+        self.tgl_screen = Toggle(True)
+        self.tgl_screen.toggled = self._screen_switch_changed
+        sv.addWidget(_setting_row('屏幕显示', '关掉可省电 / 防烧屏; 信息卡与自定义图片会一起熄灭',
+                                  '🖥️', self.tgl_screen))
+        self.lbl_screen = QLabel('状态未知 (未连接)')
+        self.lbl_screen.setObjectName('CardHint')
+        sv.addWidget(self.lbl_screen)
+        v.addWidget(sw_card)
+
         # --- 官方历史图片 (0.1.9): 读官方软件的画布缓存, 零转换直传 ---
         self.hist_list = None
         hist_bins = self._scan_history_bins()
@@ -2704,8 +2749,34 @@ class ScreenPage(QWidget):
             tip = ''
         self.btn_up.setToolTip(tip)
 
+    # ---- 屏幕开关 (0xC0/0xC1) ----
+    def _screen_switch_changed(self, on):
+        """用户拨动开关 → 下发 0xC0, 按**回读结果**回填标签; 未确认则回滚 UI 到设备真实态。"""
+        w = self.ctx['worker']
+        res = w.set_lcd_switch(on)
+        if res is None:
+            cur = w.get_lcd_switch_status()
+            if cur is not None:
+                self.tgl_screen.setChecked(bool(cur))     # 回滚 (setChecked 不触发 toggled, 不会回环)
+                self.lbl_screen.setText(f'设备当前: {"开启" if cur else "关闭"} (本次未生效)')
+            else:
+                self.lbl_screen.setText('⚠️ 未确认 (设备未就绪或上传中), 请稍后重试')
+        else:
+            self.lbl_screen.setText('设备当前: ' + ('开启' if res else '关闭'))
+
+    def _refresh_screen_switch(self):
+        """连接建立后回填屏幕开关真实状态 (Toggle.setChecked 不发 toggled, 不会误写)。"""
+        st = self.ctx['worker'].get_lcd_switch_status()
+        if st is None:
+            self.lbl_screen.setText('状态未知 (未连接)')
+            return
+        self.tgl_screen.setChecked(bool(st))
+        self.lbl_screen.setText('设备当前: ' + ('开启' if st else '关闭'))
+
     def _on_conn_changed(self, ok, msg):
         self._sync_buttons()
+        if ok:
+            self._refresh_screen_switch()
 
     def _upload(self):
         if not self._path or self._busy or not self._img_valid:

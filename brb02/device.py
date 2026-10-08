@@ -26,6 +26,23 @@ def _flip_canvas(data: bytes, w: int, h: int, flip_h: bool, flip_v: bool) -> byt
     return b''.join(rows)
 
 
+def _is_read_timeout(e: BaseException) -> bool:
+    """USB/BLE 读超时判定 (2026-10-08 修复)。
+
+    ⚠️ pyusb 的 `USBTimeoutError` **三个旧判据全部落空**, 导致首个超时就被当成"其他异常"
+    而 `break`: `isinstance(e, TimeoutError)` = False (它不是 TimeoutError 子类)、
+    `str(e)` 里没有 "timeout" (Windows 上是 "Operation timed out")、`errno` = None。
+    实测 `poll_report(1.5)` 因此 6 次里 4 次直接返回 None (0.31s 就退出)。
+    改为**先看异常类名** (`usbtimeouterror` 含 "timeout"), 再兜住文本/errno 两种旧情况。
+    """
+    if isinstance(e, TimeoutError):
+        return True
+    if 'timeout' in type(e).__name__.lower():
+        return True
+    s = str(e).lower()
+    return 'timeout' in s or 'timed out' in s or getattr(e, 'errno', None) == 110
+
+
 class Brb02Device:
     """散热器设备对象。所有帧均按已验证协议构建。支持 USB / BLE 双通道。"""
 
@@ -120,8 +137,8 @@ class Brb02Device:
                     rx = self._t.read(300)
             except Exception as e:
                 # 读超时属常态 (设备 500ms 才推一帧): 吃满窗口继续等, 其他异常才中断 (审计 G16)
-                if isinstance(e, TimeoutError) or 'timeout' in str(e).lower() \
-                        or getattr(e, 'errno', None) == 110:
+                # ⚠️ 判据用 _is_read_timeout: 旧写法对 pyusb 的 USBTimeoutError 全部失效 (2026-10-08 修)
+                if _is_read_timeout(e):
                     continue
                 break
             p = protocol.parse_frame(bytes(rx))
@@ -181,11 +198,24 @@ class Brb02Device:
                 return protocol.parse_cur_cooling(data)
         return None
 
-    def get_curve(self, slot: int = 1) -> Optional[list]:
-        rxs = self._send(protocol.get_any_cooling(slot))
+    def get_curve(self, level: int = 1, form: int = 1) -> Optional[list]:
+        """读指定**档位** (1..4) 的智能变频曲线锚点 (0x26)。
+        ⚠️ 参数是档位不是"槽号": 旧签名叫 slot 且该字节被固件忽略 (只读 form/level 两参),
+        恒返回 L1 曲线 —— 见 protocol.get_any_cooling 的实证说明。
+        form=0 的应答只有 6B (固定转速), 不是曲线 → 返回 None (该形态用 parse_cur_cooling 解)。"""
+        rxs = self._send(protocol.get_any_cooling(level, form))
         for cmd, data in rxs:
             if cmd == protocol.Cmd.GET_ANY_COOLING_CONFIG:
                 return protocol.parse_curve(data)
+        return None
+
+    def get_lcd_show_pos(self) -> Optional[dict]:
+        """0xC3 读参数页三格布局 (0xC2 的读回对)。→ {'pos','count','items'} 或 None。
+        只读命令, 用于写后回读校验 / 读取设备当前布局 (固件 FUN_1b496 实证)。"""
+        rxs = self._send(protocol.get_lcd_show_pos())
+        for cmd, data in rxs:
+            if cmd == protocol.Cmd.GET_LCD_SHOW_POS:
+                return protocol.parse_lcd_show_pos(data)
         return None
 
     def get_rgb_switch(self) -> Optional[bool]:
@@ -193,6 +223,21 @@ class Brb02Device:
         for cmd, data in rxs:
             if cmd == protocol.Cmd.GET_RGB_SWITCH:
                 return data[0] == 1 if data else None
+
+    def get_lcd_switch_status(self) -> Optional[bool]:
+        """0xC1 读屏开关状态 (True = 屏开)。固件返回 bRam00006703。"""
+        rxs = self._send(protocol.get_lcd_switch_status())
+        for cmd, data in rxs:
+            if cmd == protocol.Cmd.GET_LCD_SWITCH_STATUS:
+                return data[0] == 1 if data else None
+        return None
+
+    def set_lcd_switch(self, on: bool) -> Optional[bool]:
+        """0xC0 设置屏开关, 并用 0xC1 回读确认。返回回读值; None = 写或回读未确认。
+        (2026-10-08 固件全解: 守卫 val<2; 写 bRam06703 + 影子 18868(1开/2关) + 落盘)"""
+        self._send(protocol.set_lcd_switch(on), wait_s=0.35)
+        cur = self.get_lcd_switch_status()
+        return cur if cur == bool(on) else None
         return None
 
     def get_rgb_effect(self) -> Optional[dict]:

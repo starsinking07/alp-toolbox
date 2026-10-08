@@ -28,23 +28,38 @@ HEADER = 0xA5
 class Cmd:
     ISSUE_SYSTEM_INFO      = 0x07   # ✓ 主机参数推送 (屏幕参数页数据源, 见 build_host_info)
     SYSTEM_INFO_REPORT     = 0x06   # ✓ 设备主动上报: [06][rpm_lo][rpm_hi][flag][ck]
-    GET_FIRMWARE_VERSION   = 0xC1   # ✓ [A5][04][C1][6A]
+    GET_LCD_SWITCH_STATUS  = 0xC1   # ✓ 读屏开关状态 (0xC0 的读回对, bRam06703); 旧名 GET_FIRMWARE_VERSION 系误标
+    SET_LCD_SWITCH         = 0xC0   # ✓ 设置屏开关 (0=关/1=开); 写 bRam06703 + 影子 18868 + 落盘
     GET_RGB_SWITCH         = 0x11   # ✓ [A5][04][11][BA] -> [05][11][on][x]
     SET_COOLING_CONFIG     = 0x24   # ✓ 固定9字节 / 曲线19字节
     GET_CUR_COOLING_CONFIG = 0x25   # ✓ -> [A5][09][25][00][00][01][rpm16][pct]
-    GET_ANY_COOLING_CONFIG = 0x26   # ✓ +slot -> 19字节曲线
+    GET_ANY_COOLING_CONFIG = 0x26   # ✓ +[form][level] -> 曲线 16B / 固定转速 6B
     GET_CUR_RGB_EFFECTS    = 0x13   # ✓ -> 9字节数据: [配置头5B][R][G][B][动态1B]
     GET_ANY_RGB_EFFECTS    = 0x14   # ✓ +idx -> 12字节
     SET_RGB_EFFECTS        = 0x12   # ✓ (2026-10-02 USBPcap 实测) 参数=GET前5字节原样+RGB
-    GET_LCD_SCREEN_SWITCH  = 0x6A   # ✓ -> [05][6A][on][x]; 对应 set = 0xC0 (DLL 实锤 2026-10-06)
+    GET_LCD_SCREEN_SWITCH  = 0x6A   # ⚠️ 弃用: 固件实证 0x6A **不存在** (2026-10-08); 屏开关读用 0xC1
     RESTORE_FACTORY        = 0xF0   # ✓ [A5][04][F0][99] (rescue 用过)
     ENTER_BOOT_MODE        = 0x05   # ✓ [A5][03][05][CK] 短形态即触发 (盲扫实锤, 见 enter_boot_mode)
     GET_FIRMWARE_STRING    = 0x01   # ✓ [A5][03][01][A9] -> 完整版本串
+    GET_LCD_SHOW_POS       = 0xC3   # ✓ 参数页布局读回 (0xC2 的读回对, 应答 15B; 固件 FUN_1b496)
 
 
 def checksum(body: bytes) -> int:
     """累加和校验 (不含 CK 自身)"""
     return sum(body) & 0xFF
+
+
+def crc16_ccitt(data: bytes) -> int:
+    """CRC16-CCITT (poly 0x1021, init 0, 不反转) —— 设备→主机**命令应答**的尾字节算法。
+
+    固件实证 (2026-10-08, 命令分发器反编译): 命令应答尾字节 = 本 CRC 的低字节;
+    而主机→设备帧 与 0x06 主动上报 仍用累加和 (checksum)。两者不可混。"""
+    crc = 0
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
 
 
 def build_frame(cmd: int, params: bytes = b'') -> bytes:
@@ -64,7 +79,10 @@ def parse_frame(rx: bytes) -> Optional[tuple[int, bytes]]:
     CK 恰为 0x00 时, 校验字节连同尾部填充一起被吃掉, LEN 超过剩余长度, 合法帧
     被整帧丢弃。现在直接在原始包上按 LEN 切帧, 不用 rstrip 决定载荷。
     尾字节歧义处理: 先按累加和自检 —— 对得上则尾字节是校验 (裁掉),
-    对不上则尾字节是数据 (保留, 如 0x25 应答的百分比、版本应答的尾部字节)。"""
+    对不上则尾字节是数据 (保留)。⚠️ 设备→主机**命令应答**的尾字节其实是 CRC16-CCITT
+    低字节 (非累加和, 固件实证 2026-10-08), 故对命令应答本函数会**保留该字节** ——
+    这是有意为之 (各解析器按已知长度从头部读, 尾字节自然被忽略); 切勿"修"成裁掉,
+    否则 0x25 六字节简版应答会少一字节, 致 parse_cur_cooling 判长失败。"""
     if not rx or len(rx) < 4 or rx[0] != HEADER:
         return None
     ln = rx[1]
@@ -101,10 +119,18 @@ def get_cur_cooling() -> bytes:
     return body + bytes([checksum(body)])
 
 
-def get_any_cooling(slot: int) -> bytes:
-    """slot 1..4, 实测: -> 19 字节曲线"""
-    body = bytes([HEADER, 0x06, Cmd.GET_ANY_COOLING_CONFIG, 0x01, 0x01, slot])
-    return body + bytes([checksum(body)])
+def get_any_cooling(level: int = 1, form: int = 1) -> bytes:
+    """0x26 读**指定档位**的制冷配置。固件 `dec_1b87c.c case 0x26` 实证:
+    参数恰好 2 字节 `[form][level]` (内部长度必须 8 = 线长 6 + 2 seq), 且
+    `form ∈ {0,1}`、`level ∈ 1..4`, 越界固件直接 return (无应答)。
+    应答 = `[src][form][level]` + 载荷 + CRC:
+      form=1 (智能变频曲线) → 12B 锚点, 共 16B;  form=0 (固定转速) → rpm16, 共 6B。
+    ⚠️ 旧实现写成 `[A5][06][26][01][01][slot][CK]` —— 多塞了一个 slot 字节 (线长 7 但 LEN=6),
+       固件只读前 2 参 ⇒ **slot 被静默忽略**, 永远返回 form=1/level=1 的曲线。
+       真机实测 (2026-10-08): slot=1/2/3/4 四帧应答**逐字节相同**, 已定案为 bug。"""
+    level = max(1, min(4, int(level)))
+    form = 1 if int(form) else 0
+    return build_frame(Cmd.GET_ANY_COOLING_CONFIG, bytes([form, level]))
 
 
 def get_cur_rgb() -> bytes:
@@ -118,7 +144,28 @@ def get_any_rgb(idx: int) -> bytes:
 
 
 def get_lcd_switch() -> bytes:
+    """⚠️ 弃用 (2026-10-08): 固件反编译实证 **0x6A 不存在** (命令分发无此 case)。
+    屏开关状态读请用 0xC1 (`Cmd.GET_LCD_SWITCH_STATUS`)。保留仅为历史/兼容。"""
     return bytes([HEADER, 0x03, 0x6A, checksum(bytes([HEADER, 0x03, 0x6A]))])
+
+
+def get_lcd_switch_status() -> bytes:
+    """0xC1 读屏开关状态 (0xC0 的读回对)。固件 `case 0xC1` 返回 `bRam00006703`。
+    官方实帧: `A5 04 C1 6A` (LEN=4, 无参数)。"""
+    body = bytes([HEADER, 0x04, Cmd.GET_LCD_SWITCH_STATUS])
+    return body + bytes([checksum(body)])
+
+
+def set_lcd_switch(on: bool) -> bytes:
+    """0xC0 设置屏开关 (固件 `case 0xC0` 完整解码, 2026-10-08)。
+    守卫: 内部长度 == 7 (= 线长 5 + 2 seq) 且 **值 < 2** (只收 0/1), 否则整帧忽略。
+    动作: 值变则写 `bRam00006703` (0xC1 读回的那个字节) + 影子 `uRam00018868`
+    (**1=屏开 / 2=屏关** —— 传图路径 `dec_1b87c:660` 用 `18868==1` 判断"屏可见才绘制")
+    + `bRam00005bc3`, 然后 `FUN_15f34` 落盘 NVM。
+    官方用法: 软件启动时连做两次 off→on "眨眼", 强制屏重绘 (cap6: `c0 00`→`c0 01` ×2);
+    **与图传无关** (cap6 的两次图传 80s/120s 前后都没有 0xC0)。
+    官方实帧: `A5 05 C0 00 6A`(关) / `A5 05 C0 01 6B`(开)。"""
+    return build_frame(Cmd.SET_LCD_SWITCH, bytes([1 if on else 0]))
 
 
 def set_cooling_fixed(rpm: int, level: int = 1, src: int | None = None) -> bytes:
@@ -136,13 +183,15 @@ def set_cooling_fixed(rpm: int, level: int = 1, src: int | None = None) -> bytes
 
 def set_cooling_curve(anchors: list[tuple[int, int]], level: int = 1, src: int | None = None) -> bytes:
     """智能变频曲线: 4 个 (温度°C, 转速RPM) 锚点, 写入指定档位 (01-04) 的曲线槽。
-    帧: [A5][13][24][00][01][level][t1][rpm1_16][t2][rpm2_16]...[t4][rpm4_16][C8][ck]
+    帧: [A5][13][24][00][01][level][t1][rpm1_16]...[t4][rpm4_16][ck]  —— 19 字节, **无尾字节**。
+    ⚠️ 固件 (0x1b87c case 0x24) 要求内部长度恒为 0x15 (= 线长 19), 载荷 [src][01][level]+12B 锚点,
+    恰好 15 字节; 旧实现多写一个 0xC8 → 线长 20 (LEN=0x14) → 固件判长不符直接回错误, 曲线写不进去
+    (2026-10-08 固件逆向 + 官方 cap5 抓包 `a5 13 24 00 01 01 14 b0 04 ... 0a 73` 实证, 已修)。
     ⚠️ 锚点必须单调合法, 否则会写坏设备配置导致开机循环!"""
     assert len(anchors) == 4, '需要 4 个锚点'
     params = bytes([0x00 if src is None else (int(src) & 0xFF), 0x01, max(1, min(4, int(level)))])
     for t, rpm in anchors:
         params += bytes([t & 0xFF, rpm & 0xFF, (rpm >> 8) & 0xFF])
-    params += bytes([0xC8])
     return build_frame(Cmd.SET_COOLING_CONFIG, params)
 
 
@@ -176,6 +225,40 @@ def set_lcd_show_pos(ids, pos: int = 0) -> bytes:
         x = LCD_SHOW_POS_X[i % 3]
         params += bytes([pid & 0xFF, x & 0xFF, (x >> 8) & 0xFF, LCD_SHOW_POS_Y])
     return build_frame(0xC2, params)
+
+
+def get_lcd_show_pos() -> bytes:
+    """构造 0xC3 参数页布局读回帧 (0xC2 的读回对)。
+
+    **短形态** `A5 03 C3 6B` (LEN=3, 与 get_cur_rgb 同款; 盲扫正是用
+    这一形态拿到 15B 数据帧, 故照抄 —— 0x25 前例证明 LEN 形态会影响应答分支, 不臆改)。
+    应答 15B, 与 0xC2 写载荷同模板:
+    `[0x00][pos][条数] + 条数×([id][x u16le][y u8])`。
+    固件实证 (2026-10-08): FUN_0001b496 从 0x18860+1 拷 15B —— 与 0xC2 同源。
+    实测应答 (三次逐字节恒定) `00 00 03 00 6E 00 68 01 D7 00 68 07 26 01 68`
+    → id = [0, 1, 7] (官方默认 CPU温/GPU温/时间)。"""
+    body = bytes([HEADER, 0x03, Cmd.GET_LCD_SHOW_POS])
+    return body + bytes([checksum(body)])
+
+
+def parse_lcd_show_pos(data: bytes) -> Optional[dict]:
+    """解析 0xC3 应答 → {'pos': int, 'count': int, 'items': [(id, x, y), ...]}。
+
+    ⚠️ 实测读回的几何 (x=110/215/294, y=104) 与 0xC2 写的默认几何
+    (x=10/143/276, y=100) **不同** —— 回读校验时应只比 id/pos, **勿逐字节比几何**
+    (设备侧是否重算几何 / 是否静态表, 见 PROTOCOL §11.4 D3 待真机厘清)。
+    应答尾字节为 CRC16 (非累加和) 时 parse_frame 会把它留在 data 末尾, 本解析器
+    按 count 只取前 3+count×4 字节, 自动忽略尾字节。"""
+    if len(data) < 3:
+        return None
+    count = data[2]
+    items = []
+    for i in range(min(count, 3)):
+        off = 3 + i * 4
+        if off + 4 > len(data):
+            break
+        items.append((data[off], data[off + 1] | (data[off + 2] << 8), data[off + 3]))
+    return {'pos': data[1], 'count': count, 'items': items}
 
 
 # ---- 设备开关向量 (0x02/0x03, 2026-10-06 定案: FanControlPortable/PIut02 交叉验证
@@ -227,18 +310,24 @@ def parse_status_report(data: bytes) -> Optional[dict]:
 
 
 def parse_cur_cooling(data: bytes) -> Optional[dict]:
-    """cmd 0x25 应答解析 (形态感知, 2026-10-06):
-    6B 简版: [mode][x][on][rpm_lo][rpm_hi][pct] —— rpm 为设备实际转速。
-    15B 全量 (LEN=3 短形态请求触发): [mode][x][on]+4×(温度,rpm16) 曲线+[pct],
-    **无独立 rpm 字段** —— 此时 rpm 返回 None (绝不能把锚点字节当 rpm, 45076 案)。
-    pct 实测为 0~255 原始量 (观测 127~239), 并非 0~100 百分比, 语义未解。
-    rpm 超出物理范围 (>4800) 一律视为解析失败置 None。key 名保留 percent 以兼容。"""
+    """cmd 0x25 应答解析 (形态感知)。固件 `dec_1b87c.c case 0x25` 实证字段:
+    头 3B = `[src][form][level]`, 之后按 form 分流:
+      form=0 (固定转速) → 追加 rpm16, 共 6B;  form=1 (智能变频) → 追加 12B 曲线锚点, 共 16B。
+    与 0x26 应答**完全同构** (0x26 = 读"指定档位", 0x25 = 读"当前档位")。
+    ⚠️ 三个历史键名是误称, 保留仅为兼容: `mode`=参照源(0=CPU/1=GPU, 同 0x22/0x23)、
+      `on`=**档位 1..4 (不是开关!)**、`percent`=CRC16-CCITT 尾字节(不是百分比)。
+      新代码请用 `src` / `level` / `crc`。
+    form=1 时**无独立 rpm 字段** → rpm 返回 None (绝不能把锚点字节当 rpm, 45076 案)。
+    rpm 超出物理范围 (>4800) 一律视为解析失败置 None。"""
     if len(data) < 6:
         return None
     rpm = data[3] | (data[4] << 8) if len(data) == 6 else None
     if rpm is not None and rpm > 4800:
         rpm = None
-    return {'mode': data[0], 'on': data[2], 'rpm': rpm, 'percent': data[5]}
+    src, form, level = data[0], data[1], data[2]
+    return {'src': src, 'form': form, 'level': level,
+            'mode': src, 'on': level,        # 兼容旧键名 (mode=参照源; on 实为档位 1..4)
+            'rpm': rpm, 'percent': data[-1], 'crc': data[-1]}
 
 
 def parse_firmware_version(data: bytes) -> str:
@@ -275,14 +364,23 @@ def parse_rgb_effect(data: bytes) -> Optional[dict]:
 
 
 # 灯效模式 ID (全部实测: 用户切换各模式时 USBPcap 抓取 0x12 帧)
+# ⚠️ 2026-10-08 定案修正: **响应 = 0x06 / 刷新 = 0x08** (旧值 08/06 弄反了)。
+#   三条独立证据:
+#   ① 固件 dec_1b87c.c case 0x16: `entry[当前槽位][0] == 0x06` 才复位动画计数器
+#      (= IssueMouseKeyPress 的响应门控);
+#   ② 真机探针 (两种顺序各测一遍): 写 byte0=0x06 → `0x16` 应答 `00 16`(是响应);
+#      写 byte0=0x08 → `01 37`(非响应);
+#   ③ 官方 pcap (capme2_user.pcap, 19076 包) 全程只有 2 个 `0x16` 帧, 且都落在
+#      活动模式 = 0x06 的窗口内 (101.184s 写 06 → 107.173/107.835 两个 0x16 → 107.902 写 08)。
+#   注: LIGHTING.md §4 旧表把 06 标"刷新"、08 标"响应", 系抓包时按 UI 位置误标, 已一并修正。
 RGB_MODE_FLOW = 0x11        # 彩色流动
 RGB_MODE_CYCLE = 0x02       # 彩色循环
 RGB_MODE_BREATH = 0x03      # 呼吸
 RGB_MODE_STEADY = 0x04      # 常亮
 RGB_MODE_BLINK = 0x05       # 闪烁
-RGB_MODE_REACTIVE = 0x08    # 响应
-RGB_MODE_REFRESH = 0x06     # 刷新
-RGB_MODE_AUDIO = 0x07       # 音频同步 (需另以 ~5Hz 推 0x15 电平流, 未实现)
+RGB_MODE_REACTIVE = 0x06    # 响应 (键鼠按下联动; 设备侧只有此值会让 0x16 生效)
+RGB_MODE_REFRESH = 0x08     # 刷新
+RGB_MODE_AUDIO = 0x07       # 音频同步 (需另以 ~5Hz 推 0x15 电平流, 见 service._start_audio)
 RGB_COLOR_SINGLE = 0x01     # 单色
 RGB_COLOR_MULTI = 0x0A      # 彩色
 
