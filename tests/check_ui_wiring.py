@@ -66,6 +66,19 @@ check('固件版本标签', hasattr(cp, 'lbl_fw'))
 btns = [b.text() for b in cp.findChildren(QPushButton)]
 check('参数页显示按钮', any('参数页显示' in t for t in btns))
 
+# --- 实时速度刷新链路 (2026-10-08 修复 15s 滞后 + 文案重复) ---
+check('ControlPage 提供 on_status (每 tick 刷新)', hasattr(cp, 'on_status'))
+cp.on_status({'rpm': 1980})
+check('on_status → 实时速度显示裸数值 (不再重复"实时速度"前缀)',
+      cp.lbl_speed.text() == '1980 RPM')
+cp.on_status({'rpm': 0})
+check('rpm=0 → -- RPM', cp.lbl_speed.text() == '-- RPM')
+cp.on_info({'cooling': {'rpm': 1600}})
+check('on_info 不覆盖实时转速 (转速只由 on_status 管)', cp.lbl_speed.text() == '-- RPM')
+check('on_info → 控制模式无重复前缀', cp.lbl_mode2.text() in ('手动', '智能变频'))
+cp.on_status({'rpm': 1600})
+check('重新连上后 on_status 立即恢复显示', cp.lbl_speed.text() == '1600 RPM')
+
 # ===== ScreenPage =====
 print('=== ScreenPage ===')
 from brb02.gui.pages import ScreenPage

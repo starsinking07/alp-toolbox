@@ -1583,13 +1583,23 @@ class ControlPage(QWidget):
         cfg.screen_card_auto = on
         cfg.save()
 
+    def on_status(self, st: dict):
+        """**每 tick (~1s)** 刷新实时转速 —— 与状态页同源。
+
+        ⚠️ 2026-10-08 修复: 旧版只在 `on_info` 里刷, 而 `on_info` 由 `emit_info()` 驱动,
+        每 **15 秒**才发一次 ⇒ 控制页的「实时速度」明显滞后 (用户截图: 实际 ~1980 却显示 4260)。
+        同时修掉值里重复的 "实时速度  " 前缀 (卡片上方已有同名标题)。
+        """
+        rpm = st.get('rpm', 0)
+        self.lbl_speed.setText(f'{rpm} RPM' if rpm else '-- RPM')
+
     def on_info(self, info: dict):
-        c = info.get('cooling')
-        if c:
-            self.lbl_speed.setText(f"实时速度  {self.ctx['main'].last_rpm} RPM")
-        self.lbl_mode2.setText(f"控制模式  {'智能变频' if self.ctx['cfg'].curve_enabled else '手动'}")
+        """连接态 / 配置派生字段 (15s 周期 + 连接变化时立即触发)。实时转速见 on_status。"""
+        self.lbl_mode2.setText('智能变频' if self.ctx['cfg'].curve_enabled else '手动')
         conn = self.ctx['main'].is_connected
         self.lbl_dev_state.setText('已连接' if conn else '未连接')
+        if not conn:
+            self.lbl_speed.setText('-- RPM')       # 断线: 转速数据源失效
         # 灯光开关初始态: 连接建立后用设备真实值刷新一次
         # (构造时设备多半还没连上, 开关停留在默认值)
         if conn and not getattr(self, '_light_synced', False):

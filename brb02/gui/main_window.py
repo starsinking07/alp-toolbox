@@ -536,6 +536,8 @@ class MainWindow(QMainWindow):
         self.last_rpm = st.get('rpm', 0)
         self.titlebar.on_status(st, self.cfg.dark)
         self.pages['status'].on_status(st)
+        # 控制页「实时速度」也走每 tick 通道 (2026-10-08: 旧版只在 15s 的 on_info 刷, 明显滞后)
+        self.pages['control'].on_status(st)
 
     def _on_temps(self, cpu, gpu):
         self.titlebar.on_temps(cpu, gpu, self.cfg.dark)
@@ -564,16 +566,20 @@ class MainWindow(QMainWindow):
             # 断线: 转速数据源失效, 复位显示并立即刷新托盘信息行
             self.last_rpm = 0
             self._update_tray_info()
-        # 相同消息节流: 5 秒内不重复写日志
+        self.titlebar.on_conn(ok)
+        # ⚠️ 连接态必须**立即**反映到两个页面 —— 放在日志节流**之前**
+        # (旧版把 pages['status'].on_info 放在节流之后, 且完全不通知控制页 ⇒ 连接/断开后
+        #  最长 15s 页面还显示旧状态)
+        _info = self._info_cache if ok else {}
+        self.pages['status'].on_info(_info)
+        self.pages['control'].on_info(_info)
+        # 相同消息节流: 5 秒内不重复写日志 (只节流日志, 不再影响界面刷新)
         if msg == getattr(self, '_last_conn_msg', None) and \
                 _t.time() - getattr(self, '_last_conn_msg_ts', 0) < 5.0:
-            self.titlebar.on_conn(ok)
             return
         self._last_conn_msg = msg
         self._last_conn_msg_ts = _t.time()
         LOGBUF.write(f'[连接] {msg}')
-        self.titlebar.on_conn(ok)
-        self.pages['status'].on_info(self._info_cache if ok else {})
 
     def _on_info(self, info: dict):
         self._info_cache = info
