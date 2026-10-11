@@ -796,6 +796,14 @@ class CurvePage(QWidget):
         self.lbl_btn_level.setObjectName('CardHint')
         bv.addWidget(self.lbl_btn_level)
 
+        self.btn_read_dev = QPushButton('从设备读取 4 档曲线（建议先点一次）')
+        self.btn_read_dev.setToolTip(
+            '设备出厂时四档曲线各不相同（LV1 低噪 → LV4 超频），而本卡默认值是四档都固定 1200\n'
+            '—— 直接开启会把出厂差异压平。先点这里把设备四档曲线读回来作为初始配置，\n'
+            '各档即等于设备原生行为，再逐档微调。')
+        self.btn_read_dev.clicked.connect(self._btn_read_from_device)
+        bv.addWidget(self.btn_read_dev)
+
         bgrid = QGridLayout()
         bgrid.setHorizontalSpacing(12)
         bgrid.setVerticalSpacing(8)
@@ -1092,6 +1100,14 @@ class CurvePage(QWidget):
     def _btn_edit_curve(self, idx):
         self._btn_show_curve(idx)
 
+    def _btn_read_from_device(self):
+        """把设备四档曲线读回来当初始配置 (= 设备出厂行为, 避免默认值把四档压平)。"""
+        n = self.ctx['worker'].read_device_button_profiles()
+        self._btn_load_ui()
+        self.lbl_btn_editing.setText(
+            f'已从设备读回 {n}/4 档曲线作为初始配置（= 设备出厂行为，可逐档微调）'
+            if n else '读取失败：设备未连接？详见「关于」页日志')
+
     def _btn_curve_changed(self, pct_list):
         cfg = self.ctx['cfg']
         i = getattr(self, '_btn_edit_idx', 0)
@@ -1125,7 +1141,8 @@ class CurvePage(QWidget):
                 ctl.tgl_tec.blockSignals(False)
         except Exception:
             pass
-        self.ctx['worker'].push_button_profiles()
+        # ⚠️ 开关切换**不写设备**: 默认配置是 4 档都 1200 RPM, 一开就写会覆盖设备出厂的
+        # 四档转速。只有用户主动改某一档时才写那一档 (见 _btn_profile_changed)。
 
     def _reset(self):
         cfg = self.ctx['cfg']

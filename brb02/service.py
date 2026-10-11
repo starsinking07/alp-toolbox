@@ -637,6 +637,43 @@ class DeviceWorker(QThread):
         ]
 
     # ---- 物理按键控制模式 (0.1.10) ----
+    def read_device_button_profiles(self) -> int:
+        """从设备读回 4 档**曲线槽** (0x26 form=1) 作为按键模式的初始配置。
+
+        设备出厂时四档曲线各不相同 (LV1 低噪 → LV4 超频, 实测逐档递增), 而配置默认值是
+        四档都 1200 固定 ⇒ 直接开启会把出厂差异压平。先点这个按钮读回, 初始配置就等于
+        设备原生行为, 再按需微调。返回成功读取的档位数。
+        """
+        from .logbuf import LOGBUF
+        if not self.device.connected:
+            return 0
+        ok = 0
+        for lvl in range(1, 5):
+            pts = None
+            try:
+                for c, x in self.device._send(protocol.get_any_cooling(lvl, 1),
+                                              wait_s=0.4, max_rx=4):
+                    if c == 0x26 and len(x) >= 16:      # [src][form][level] + 4×[t][rpm16]
+                        pts = [(x[3 + i * 3], x[4 + i * 3] | (x[5 + i * 3] << 8))
+                               for i in range(4)]
+                        break
+            except Exception as e:
+                LOGBUF.write(f'[按键] 读 L{lvl} 曲线槽失败: {e}')
+            if pts:
+                old = self._button_profile(lvl)
+                self.config.button_profiles[lvl - 1] = {
+                    'mode': 'curve',
+                    'rpm': int(old.get('rpm') or 1200),
+                    'curve': [list(p) for p in pts],
+                }
+                ok += 1
+            time.sleep(0.08)
+        if ok:
+            self.config.save()
+        LOGBUF.write(f'[按键] 已从设备读回 {ok}/4 档曲线作为初始配置'
+                     + ('（= 设备出厂行为, 可在此基础上微调）' if ok == 4 else '（部分失败）'))
+        return ok
+
     def push_button_profiles(self) -> int:
         """把 4 个档位的**固定转速**配置写进设备档位槽 (0x24 带 level)。
 

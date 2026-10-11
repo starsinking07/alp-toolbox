@@ -53,6 +53,7 @@ class _W(QObject):
     def set_lcd_switch(self, on): self._lcd = bool(on); return bool(on)
     def get_lcd_switch_status(self): return True
     def push_button_profiles(self): return 4          # 物理按键控制: 写设备档位槽 (stub)
+    def read_device_button_profiles(self): return 4   # 物理按键控制: 从设备读回 4 档 (stub)
 
 cfg = Config.load(); cfg.dark = False
 ctx = {'cfg': cfg, 'worker': _W(), 'dark': False,
@@ -340,6 +341,11 @@ check('引擎: 档位取设备值而非按转速反推', '_dev_level()' in _svc_
 check('引擎: TEC 自动档位在按键模式下跳过', 'cfg.button_follow_enabled' in _svc_src)
 check('引擎: 目标按档位配置取 (固定/该档曲线)', '_button_profile' in _svc_src)
 check('有写设备档位槽的方法', hasattr(_svc.DeviceWorker, 'push_button_profiles'))
+check('有「从设备读取 4 档曲线」按钮 (防默认值压平出厂差异)',
+      hasattr(cvp, 'btn_read_dev') and hasattr(_svc.DeviceWorker, 'read_device_button_profiles'))
+check('开关切换不写设备 (只有改配置才写)',
+      '_btn_follow_toggled' in _ins.getsource(CurvePage)
+      and 'push_button_profiles' not in _ins.getsource(CurvePage._btn_follow_toggled))
 
 # ===== USB 读超时判定 (2026-10-08 修复: 旧判据对 USBTimeoutError 全失效) =====
 print('=== USB 读超时判定 ===')
