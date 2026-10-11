@@ -501,6 +501,26 @@ if _MW2 is not None:
     cfg.curve_enabled = False
     _apply()
 
+    # --- 端到端: 主窗口 sync_mode_exclusivity → 各页回填 (托盘走的就是这条链) ---
+    print('=== 端到端: 托盘 → 主窗口 → 各页 ===')
+    _cvp3 = _CP2(dict(ctx))
+    _mw3 = _MW2.__new__(_MW2)          # 只搭最小属性, 走真实 sync_mode_exclusivity
+    _mw3.cfg = cfg
+    _mw3.pages = {'status': _sp3, 'curve': _cvp3, 'control': _cp3, 'buttons': _bp3}
+    cfg.button_follow_enabled = True
+    cfg.curve_enabled = False
+    cfg.tec_auto_enabled = False
+    _MW2.sync_mode_exclusivity(_mw3)
+    check('主窗口互斥同步 → 按键页开关回填为开', _bp3.tgl_follow.isChecked() is True)
+    check('主窗口互斥同步 → 控制页/状态页/曲线页开关全部回填为关',
+          not _cp3.tgl_curve.isChecked() and not _cp3.tgl_tec.isChecked()
+          and not _sp3.tgl_smart.isChecked() and not _cvp3.tgl_smart2.isChecked())
+    cfg.button_follow_enabled = False
+    cfg.tec_auto_enabled = True
+    _MW2.sync_mode_exclusivity(_mw3)
+    check('主窗口互斥同步 → 控制页档位自动开关回填为开', _cp3.tgl_tec.isChecked() is True)
+    cfg.tec_auto_enabled = False
+
 # ===== USB 读超时判定 (2026-10-08 修复: 旧判据对 USBTimeoutError 全失效) =====
 print('=== USB 读超时判定 ===')
 from brb02.device import _is_read_timeout
