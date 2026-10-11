@@ -845,7 +845,8 @@ class CurvePage(QWidget):
         self.lbl_btn_editing.setObjectName('CardHint')
         bv.addWidget(self.lbl_btn_editing)
         self._btn_edit_idx = 0
-        v.addWidget(btnc)
+        # 放到「方案」之后 (顶部): 这是**模式级**开关, 埋在曲线编辑器下方没人找得到
+        v.insertWidget(v.indexOf(prof) + 1, btnc)
         self._btn_load_ui()
 
         # 智能启停 + 学习 + 预判 (网格两列)
