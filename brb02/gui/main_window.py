@@ -534,6 +534,7 @@ class MainWindow(QMainWindow):
             f'CPU {cpu:.0f}°C · GPU {gpu:.0f}°C')
         self.titlebar.on_mode(self.cfg.curve_enabled)   # 模式徽章以 cfg 为唯一数据源 (3s 心跳兜底)
         self.pages['curve'].tick_ui()
+        self.pages['buttons'].tick_ui()      # 物理按键页: 刷新"当前设备档位"显示
 
     # ---- worker 信号 ----
     def _on_status(self, st: dict):
@@ -550,16 +551,26 @@ class MainWindow(QMainWindow):
 
     def _on_device_gear(self, level: int, rpm: int):
         """物理按钮换档被工具箱接管 (worker 发起, 仅告知)。"""
-        # 无边框窗口没有状态栏: 换档事件走日志 + 托盘气泡 (防御式, 托盘可能不可用)
-        LOGBUF.write(f'[档位] 物理按钮换档 (L{level} · {rpm} RPM) —— 已按当前模式接管')
+        # 物理按键控制模式: 是"跟随"而不是"接管", 日志与提示文案要区分开 (否则误导用户)
+        follow = bool(getattr(self.cfg, 'button_follow_enabled', False))
+        if follow:
+            LOGBUF.write(f'[按键] 已跟随物理按键: LV{level} · {rpm} RPM')
+        else:
+            LOGBUF.write(f'[档位] 物理按钮换档 (L{level} · {rpm} RPM) —— 已按当前模式接管')
         try:
-            self.tray.showMessage('挡位切换', f'物理按钮 L{level} 已按当前模式接管',
-                                  QSystemTrayIcon.Information, 1500)
+            self.tray.showMessage(
+                '挡位切换',
+                f'物理按键 LV{level} · {rpm} RPM' + ('（工具箱跟随）' if follow else '（已接管）'),
+                QSystemTrayIcon.Information, 1500)
         except Exception:
             pass
         self.tray.setToolTip(f'{APP_NAME} — L{level} · {rpm} RPM')
         try:
             self.pages['status'].refresh_mode_labels()   # 手动固定转速标签随 cfg 更新
+        except Exception:
+            pass
+        try:
+            self.pages['buttons']._update_level()        # 按键页的"当前设备档位"立即刷新
         except Exception:
             pass
 

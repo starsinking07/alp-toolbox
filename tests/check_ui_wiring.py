@@ -391,6 +391,21 @@ check('主题含 QComboBox:disabled (禁用要看得出来)',
       'QComboBox:disabled' in _qss and 'QSpinBox:disabled' in _qss
       and 'QLineEdit:disabled' in _qss)
 
+# --- 换档后界面要跟着变 (2026-10-11 用户反馈"档位都读取到了 为什么图片中不变") ---
+check('ButtonPage 接了 deviceGearChanged 信号 (换档即刷新显示)',
+      'deviceGearChanged.connect' in _ins.getsource(ButtonPage.__init__))
+check('ButtonPage 有 tick_ui 心跳兜底', hasattr(ButtonPage, 'tick_ui'))
+try:
+    from brb02.gui.main_window import MainWindow as _MW2
+except Exception:
+    _MW2 = None
+if _MW2 is not None:
+    _mw_src = _ins.getsource(_MW2)
+    check('主窗口心跳会刷新按键页', "pages['buttons'].tick_ui()" in _mw_src)
+    _odg = _ins.getsource(_MW2._on_device_gear)
+    check('换档提示区分"跟随/接管" (不再一律说"已接管")',
+          'button_follow_enabled' in _odg and '跟随' in _odg)
+
 # ===== USB 读超时判定 (2026-10-08 修复: 旧判据对 USBTimeoutError 全失效) =====
 print('=== USB 读超时判定 ===')
 from brb02.device import _is_read_timeout

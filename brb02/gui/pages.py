@@ -1190,7 +1190,22 @@ class ButtonPage(QWidget):
         cv.addWidget(self.lbl_editing)
         v.addWidget(card)
         v.addStretch(1)
+        # 物理按键换档 → 立即刷新"当前设备档位"显示 (信号跨线程, 连绑定方法以保证排队到 GUI 线程)
+        try:
+            self.ctx['worker'].deviceGearChanged.connect(self._on_gear_changed)
+        except Exception:
+            pass
         self._load_ui()
+
+    def tick_ui(self):
+        """主窗口心跳调用 (每 3s): 跟随模式下刷新当前档位显示 (兜底, 防漏信号)。"""
+        if getattr(self, 'tgl_follow', None) is not None and self.tgl_follow.isChecked():
+            self._update_level()
+
+    def _on_gear_changed(self, lvl, rpm):
+        """worker 报来物理按键换档 → 立即刷新档位显示。"""
+        if getattr(self, 'tgl_follow', None) is not None and self.tgl_follow.isChecked():
+            self._update_level()
 
     # ---- 配置读写 ----
     def _profiles(self):
