@@ -998,13 +998,18 @@ class CurvePage(QWidget):
         self._sync_manual_enabled()
 
     def _sync_manual_enabled(self):
-        """手动挡位禁用条件: 智能变频开启 (会被曲线覆盖), 或被别的控制方式顶掉。"""
-        blocked, _ = self._mode_blocked_by()
+        """手动挡位禁用条件: 智能变频开启 (会被曲线覆盖), 或被别的控制方式顶掉。
+        提示文案要**说明真正的原因** (用户 2026-10-11 反馈: 开的是物理按键控制, 却提示
+        "智能变频运行中")。"""
+        blocked, why = self._mode_blocked_by()
         on = bool(self.ctx['cfg'].curve_enabled) or blocked
         for b in self.gear_btns:
             b.setEnabled(not on)
         self.slider12.setEnabled(not on)
         self.lbl_manual_hint.setVisible(on)
+        if on:
+            self.lbl_manual_hint.setText(
+                why or '智能变频运行中 — 手动挡位暂不可调 (关闭「智能变频」后可调)')
 
     def _smart_toggled(self, on):
         if on:

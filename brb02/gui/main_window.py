@@ -296,8 +296,21 @@ class MainWindow(QMainWindow):
         a_curve = QAction('智能变频', self)
         a_curve.setCheckable(True)
         a_curve.setChecked(cfg.curve_enabled)
-        a_curve.toggled.connect(self._tray_curve)
+        a_curve.toggled.connect(lambda on: self._tray_mode('curve', on))
         menu.addAction(a_curve)
+
+        # 控制方式三选一 (2026-10-11 用户要求): 与工具箱同步, 开一个另两个置灰
+        a_tec = QAction('档位自动切换', self)
+        a_tec.setCheckable(True)
+        a_tec.setChecked(bool(cfg.tec_auto_enabled))
+        a_tec.toggled.connect(lambda on: self._tray_mode('tec', on))
+        menu.addAction(a_tec)
+
+        a_follow = QAction('物理按键控制', self)
+        a_follow.setCheckable(True)
+        a_follow.setChecked(bool(cfg.button_follow_enabled))
+        a_follow.toggled.connect(lambda on: self._tray_mode('follow', on))
+        menu.addAction(a_follow)
         menu.addSeparator()
 
         a_quit = QAction('退出 Alp 工具箱', self)
@@ -308,6 +321,8 @@ class MainWindow(QMainWindow):
         self.tray.setToolTip(APP_NAME)
         self.tray.activated.connect(self._tray_activated)
         self._tray_curve_action = a_curve
+        self._tray_tec_action = a_tec
+        self._tray_follow_action = a_follow
         self.tray.show()
 
         self._tray_timer = QTimer(self)
@@ -431,7 +446,8 @@ class MainWindow(QMainWindow):
             self.tray.showMessage('挡位切换', f'{presets[self._gear_idx]} · {rpm} RPM',
                                   QSystemTrayIcon.Information, 1500)
         elif hk_id == HK_TOGGLE_SMART:
-            self._tray_curve(not self.cfg.curve_enabled)
+            # 快捷键切智能变频也走互斥入口 (会自动关掉按键控制/档位自动切换)
+            self.set_exclusive_mode('manual' if self.cfg.curve_enabled else 'curve')
 
     # ---- 托盘 ----
     def _show(self):
@@ -498,13 +514,31 @@ class MainWindow(QMainWindow):
             pass
 
     def _tray_curve(self, on: bool):
-        self.cfg.curve_enabled = on
-        self.cfg.save()
+        """同步托盘/标题栏/各页开关的智能变频显示 (**不改配置** —— 配置统一由
+        set_exclusive_mode 管, 免得绕过互斥)。"""
         self.pages['status'].sync_smart(on)
         self.pages['curve'].sync_smart(on)
         self.pages['control'].sync_smart(on)
         self._tray_curve_action.setChecked(on)
         self.titlebar.on_mode(on)
+
+    def _tray_mode(self, mode: str, on: bool):
+        """托盘切换控制方式: 开启某个模式 (自动关掉其余); 取消则回到手动。"""
+        self.set_exclusive_mode(mode if on else 'manual')
+
+    def _sync_tray_mode_actions(self):
+        """托盘三项与配置同步; 已激活的保持可点 (以便取消), 其余置灰 (用户要求)。"""
+        cfg = self.cfg
+        active = ('curve' if cfg.curve_enabled else
+                  'tec' if cfg.tec_auto_enabled else
+                  'follow' if cfg.button_follow_enabled else None)
+        for key, act, val in (('curve', self._tray_curve_action, cfg.curve_enabled),
+                              ('tec', self._tray_tec_action, cfg.tec_auto_enabled),
+                              ('follow', self._tray_follow_action, cfg.button_follow_enabled)):
+            act.blockSignals(True)
+            act.setChecked(bool(val))
+            act.blockSignals(False)
+            act.setEnabled(active in (None, key))
 
     def sync_curve_toggle(self, on: bool):
         self._tray_curve(on)
@@ -537,7 +571,7 @@ class MainWindow(QMainWindow):
         self.sync_mode_exclusivity()
 
     def sync_mode_exclusivity(self):
-        """让每个页面按当前互斥状态刷新自己的控件 (置灰 + 说明原因)。"""
+        """让每个页面按当前互斥状态刷新自己的控件 (置灰 + 说明原因), 托盘菜单一并同步。"""
         for key in ('status', 'curve', 'control', 'buttons'):
             pg = self.pages.get(key)
             fn = getattr(pg, 'sync_mode_state', None)
@@ -546,6 +580,11 @@ class MainWindow(QMainWindow):
                     fn()
                 except Exception:
                     pass
+        try:
+            self._tray_curve(self.cfg.curve_enabled)      # 标题栏模式徽章 + 各页开关回填
+            self._sync_tray_mode_actions()
+        except Exception:
+            pass
 
     def refresh_curve_cache(self):
         self._curve_cache = None

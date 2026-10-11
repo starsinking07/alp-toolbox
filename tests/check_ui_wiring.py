@@ -450,6 +450,22 @@ if _MW2 is not None:
     check('切回「手动」→ 三者全关',
           not cfg.tec_auto_enabled and not cfg.button_follow_enabled and not cfg.curve_enabled)
 
+    # --- 托盘菜单三项控制方式 (2026-10-11 用户要求) ---
+    _init_src = _ins.getsource(_MW2.__init__)
+    check('托盘有三项控制方式 (智能变频/档位自动切换/物理按键控制)',
+          all(k in _init_src for k in ("'智能变频'", "'档位自动切换'", "'物理按键控制'")))
+    check('托盘切换走互斥入口 (不再直接改配置)',
+          'set_exclusive_mode' in _ins.getsource(_MW2._tray_mode)
+          and '_tray_mode' in _ins.getsource(_MW2.__init__))
+    check('托盘三项与配置同步 (含已激活外置灰)',
+          '_sync_tray_mode_actions' in _ins.getsource(_MW2.sync_mode_exclusivity)
+          and 'setEnabled' in _ins.getsource(_MW2._sync_tray_mode_actions))
+    check('快捷键切智能变频也走互斥入口',
+          'set_exclusive_mode' in _ins.getsource(_MW2._on_hotkey)
+          if hasattr(_MW2, '_on_hotkey') else True)
+    check('手动挡位提示随原因变化 (不再固定写"智能变频运行中")',
+          'why or' in _ins.getsource(_CP2._sync_manual_enabled))
+
 # ===== USB 读超时判定 (2026-10-08 修复: 旧判据对 USBTimeoutError 全失效) =====
 print('=== USB 读超时判定 ===')
 from brb02.device import _is_read_timeout
