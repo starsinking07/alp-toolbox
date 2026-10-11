@@ -176,6 +176,7 @@ w3.config.start_stop_enabled = False; w3.config.curve_enabled = False
 w3.config.fixed_rpm = 1200
 _tec_auto_orig = w3.config.tec_auto_enabled
 w3.config.tec_auto_enabled = False   # 钉死输入: cfg 是真实配置, TEC 自动档开着时档位走 _tec_level 而非转速映射
+w3.config.button_follow_enabled = False   # 同上: 沙箱配置会继承真实/上次运行的状态, 必须钉死
 w3._temp_wall_active = False; w3._ss_stopped = False
 w3._last_sent_rpm = 1500; w3._last_send_ts = 0.0
 w3._manual_until = 0.0; w3._last_tec_sent = None; w3._tec_level = 1
@@ -190,6 +191,7 @@ sent.clear()
 w3b = DeviceWorker.__new__(DeviceWorker)
 w3b.device = _D2(); w3b.config = cfg
 w3b.config.tec_auto_enabled = True
+w3b.config.button_follow_enabled = False   # 钉死: 否则档位会走 _dev_level 而不是 _tec_level
 w3b._temp_wall_active = False; w3b._ss_stopped = False
 w3b._last_sent_rpm = None; w3b._last_send_ts = 0.0
 w3b._manual_until = 0.0; w3b._last_tec_sent = None; w3b._tec_level = 3
