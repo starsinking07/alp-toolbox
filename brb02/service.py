@@ -201,9 +201,9 @@ class DeviceWorker(QThread):
                 return
         # 手动图片上传: 在 worker 线程内独占执行 (~16.3s), 期间不轮询/不下发/不切换
         if self._upload_req is not None:
-            path, fh, fv, fit = self._upload_req
+            path, fh, fv, fit, zoom, px, py = self._upload_req
             self._upload_req = None
-            self._run_image_upload(path, fh, fv, fit)
+            self._run_image_upload(path, fh, fv, fit, zoom, px, py)
             return
         # 屏图读回 (0.1.8): 独占执行 (~30-60s), 期间同样独占
         if getattr(self, '_read_req', False):
@@ -863,15 +863,21 @@ class DeviceWorker(QThread):
 
     # ============ 屏幕图片上传 ============
     def start_image_upload(self, path: str, flip_h: bool = False, flip_v: bool = False,
-                           fit: str = 'stretch'):
+                           fit: str = 'stretch', zoom: int = 100,
+                           pan_x: int = 0, pan_y: int = 0):
         """请求上传图片到屏幕 (GUI 调用, 立即返回; 实际在 worker 线程内执行)。
 
         手动上传优先于自动信息卡: 清掉待执行的自动上屏请求; 成功后模式转 custom。
+
+        ⚠️ 2026-10-11 修复 (GitHub issue #1): 本方法此前在元组里引用了**未定义**的
+        zoom/pan_x/pan_y ⇒ 一调用就抛 NameError, 而 GUI 已置 _busy=True ⇒ **上传按钮
+        永久卡死**。zoom/pan 现作为正式参数传入 (预览与上传同源, 兑现 v0.1.9 承诺)。
         """
         self._upload_cancel.clear()
         with self._screen_qlock:             # 队列操作持锁 (审计 G6)
             self._screen_queue.clear()       # 手动图片优先: 清掉待执行的自动上屏
-        self._upload_req = (path, flip_h, flip_v, fit, zoom, pan_x, pan_y)
+        self._upload_req = (path, flip_h, flip_v, fit,
+                            int(zoom or 100), int(pan_x or 0), int(pan_y or 0))
         self._screen_cancel.clear()   # 新上传不应继承上一次取消的残留状态
 
     def cancel_image_upload(self):
@@ -948,14 +954,19 @@ class DeviceWorker(QThread):
         img = QImage(buf, W, H, W * 2, QImage.Format_RGB16).copy()
         img.save(path)
 
-    def _run_image_upload(self, path, flip_h, flip_v, fit):
-        """在 worker 线程内独占执行上传; 结束/失败/取消后一律恢复引擎。"""
+    def _run_image_upload(self, path, flip_h, flip_v, fit,
+                          zoom: int = 100, pan_x: int = 0, pan_y: int = 0):
+        """在 worker 线程内独占执行上传; 结束/失败/取消后一律恢复引擎。
+
+        zoom/pan (0.1.10, GitHub issue #1): 「缩放与位置」的值随请求传入,
+        保证**预览与上传同源** (此前签名漏了这三个参数导致 NameError 卡死上传)。"""
         from .logbuf import LOGBUF
         if self.device.conn_type != 'usb':   # 红线 (审计 G13): 图片上传仅支持 USB
             LOGBUF.write('[屏幕] 上传拒绝: 图片上传仅支持 USB 通道')
             self.uploadFinished.emit(self.device._upload_fail('图片上传仅支持 USB'))
             return
-        LOGBUF.write(f'[屏幕] 开始上传图片: {path} (翻转 H={flip_h} V={flip_v} fit={fit})')
+        LOGBUF.write(f'[屏幕] 开始上传图片: {path} (翻转 H={flip_h} V={flip_v} '
+                     f'fit={fit} zoom={zoom}% pan=({pan_x},{pan_y}))')
         self._uploading = True
 
         base_ms = 4.0 if path.lower().endswith('.bin') else None   # 历史画布 = 预验证, 走 4ms 快传
@@ -970,6 +981,7 @@ class DeviceWorker(QThread):
                     path, heartbeats=self._live_heartbeats(),
                     progress_cb=lambda s, t: self.uploadProgress.emit(s, t),
                     cancel_event=self._upload_cancel, flip_h=flip_h, flip_v=flip_v, fit=fit,
+                    zoom=zoom, pan_x=pan_x, pan_y=pan_y,
                     base_ms=base_ms, flow_control=use_flow)
             except Exception as e:
                 import traceback
@@ -994,21 +1006,27 @@ class DeviceWorker(QThread):
             self._uploading = False
             self._upload_cancel.clear()
             self._screen_cancel.clear()   # 取消按钮双事件置位, 两个都要清 (否则自动上屏永久秒取消)
-            # 恢复引擎: 强制重发当前转速 + 立即补推 0x07 参数页
+            # 恢复引擎: 强制重发当前转速 (0x07 补推挪到下方按结果决定, 见 issue #1 第三点)
             self._last_sent_rpm = None
-            self._last_07_ts = 0.0
         self.last_upload_kind = 'manual'
         LOGBUF.write(f'[屏幕] 上传结束: {res.get("reason", "")} '
                      f'(C6={res.get("c6_total", 0)} 非00={res.get("c6_bad", 0)})')
         if res.get('ok') and not res.get('canceled'):
             # 用户手动上传成功 → 切到自定义图片模式并持久化 (信息卡不再自动覆盖)
+            # ⚠️ 0x07 抑制 (issue #1 第三点): 1Hz 的 0x07 参数推送会让设备**强制刷新屏幕图层**,
+            # 把刚传好的图片顶回参数页 → 用户看到"图片无法常驻, 和参数卡反复争抢"。
+            # 成功时把 _last_07_ts 顶到当前时刻 (本 tick 的 1Hz 判断不再触发补推),
+            # 设备停留在用户图片上; 只有失败/取消时才立即补推 0x07 恢复参数页。
             self.config.screen_mode = 'custom'
+            self._last_07_ts = time.time()
             try:                                    # 磨损计数 (0.1.9)
                 self.config.screen_upload_count = int(getattr(self.config, 'screen_upload_count', 0)) + 1
                 self.uploadCountChanged.emit(self.config.screen_upload_count)
             except Exception:
                 pass
             self.config.save()
+        else:
+            self._last_07_ts = 0.0
         self.uploadFinished.emit(res)
 
     # ============ 屏幕信息卡 (v3.21: 默认卡 / 自定义图片) ============

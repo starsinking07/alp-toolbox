@@ -3248,7 +3248,20 @@ class ScreenPage(QWidget):
         self.btn_cancel.setEnabled(True)
         self.bar.setValue(0)
         self.result.setText('上传中... (约 16 秒, 请勿操作设备)')
-        w.start_image_upload(self._path, flip_h=FLIP_H, flip_v=FLIP_V, fit=self._fit)
+        try:
+            # zoom/pan 与预览同源 (0.1.10, GitHub issue #1): 「缩放与位置」滑条当前值随请求传入
+            w.start_image_upload(self._path, flip_h=FLIP_H, flip_v=FLIP_V, fit=self._fit,
+                                 zoom=int(self.sld_zoom.value()),
+                                 pan_x=int(self.sld_panx.value()),
+                                 pan_y=int(self.sld_pany.value()))
+        except Exception as e:
+            # 防御 (issue #1): 此前这里的异常会让 _busy 永远为 True → 上传按钮永久卡死
+            self._busy = False
+            self.btn_pick.setEnabled(True)
+            self.btn_up.setEnabled(True)
+            self.btn_cancel.setEnabled(False)
+            self.result.setText(f'发起上传失败: {e}')
+            return
 
     def _cancel(self):
         self.ctx['worker'].cancel_image_upload()

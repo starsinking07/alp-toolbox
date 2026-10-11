@@ -42,7 +42,8 @@ Section "Install"
     SetOutPath "$PLUGINSDIR"
     File /oname=PawnIO_setup.exe "pawnio\PawnIO_setup.exe"
     DetailPrint "安装 PawnIO 驱动 (CPU 温度监控依赖)..."
-    ExecWait '"$PLUGINSDIR\PawnIO_setup.exe" /SILENT /NORESTART' $R0
+    ; PawnIO 安装器只认短横线参数 (-install/-silent), 斜杠 /SILENT 会弹 "Unknown argument"
+    ExecWait '"$PLUGINSDIR\PawnIO_setup.exe" -install -silent' $R0
     ; 静默安装可能失败但返回 0 → 再读注册表验证服务确实出现
     ClearErrors
     ReadRegStr $1 HKLM "SYSTEM\CurrentControlSet\Services\PawnIO" "DisplayName"

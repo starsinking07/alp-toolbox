@@ -412,6 +412,7 @@ class Brb02Device:
     def upload_image(self, path: str, heartbeats=None, progress_cb=None,
                      cancel_event=None, flip_h: bool = False,
                      flip_v: bool = False, fit: str = 'stretch',
+                     zoom: int = 100, pan_x: int = 0, pan_y: int = 0,
                      base_ms: float | None = None,
                      flow_control: bool = False) -> dict:
         """上传**图片文件**到散热器屏幕 (解码为画布后委托 upload_canvas)。
@@ -443,7 +444,8 @@ class Brb02Device:
                                       flip_v=flip_v, base_ms=base_ms,
                                       flow_control=flow_control)
         try:
-            data = su.image_to_rgb565_be(path, fit=fit)
+            data = su.image_to_rgb565_be(path, fit=fit,
+                                         zoom=zoom, pan_x=pan_x, pan_y=pan_y)
         except Exception as e:
             return self._upload_fail(f'图片解码失败: {e}')
         return self.upload_canvas(data, heartbeats=heartbeats, progress_cb=progress_cb,

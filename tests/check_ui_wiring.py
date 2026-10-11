@@ -466,6 +466,33 @@ if _MW2 is not None:
     check('手动挡位提示随原因变化 (不再固定写"智能变频运行中")',
           'why or' in _ins.getsource(_CP2._sync_manual_enabled))
 
+    # --- GitHub issue #1 三连修复 (2026-10-11) ---
+    print('=== GitHub issue #1 修复 ===')
+    _sig = list(_ins.signature(_svc.DeviceWorker.start_image_upload).parameters)[1:]
+    check('上传请求签名含 zoom/pan_x/pan_y (修 NameError 卡死)',
+          _sig == ['path', 'flip_h', 'flip_v', 'fit', 'zoom', 'pan_x', 'pan_y'])
+    _siu = _ins.getsource(_svc.DeviceWorker.start_image_upload)
+    check('请求元组 7 元素且消费端解 7 元 (旧代码只解 4 元)',
+          'int(pan_y or 0))' in _siu)
+    _riu = _ins.getsource(_svc.DeviceWorker._run_image_upload)
+    check('_run_image_upload 接收并下发 zoom/pan (预览与上传同源)',
+          'zoom: int = 100' in _riu and 'zoom=zoom' in _riu)
+    from brb02.device import Brb02Device as _BD
+    _ui_src = _ins.getsource(_BD.upload_image)
+    check('device.upload_image 透传 zoom/pan 到图像变换',
+          'zoom: int = 100' in _ui_src and 'pan_y=pan_y' in _ui_src)
+    from brb02.gui.pages import ScreenPage as _ScreenPage2
+    check('GUI 上传携带滑条当前值 + 异常不再卡死 _busy',
+          'sld_zoom.value()' in _ins.getsource(_ScreenPage2._upload)
+          and 'self._busy = False' in _ins.getsource(_ScreenPage2._upload))
+    _fin = _ins.getsource(_svc.DeviceWorker._run_image_upload)
+    check('上传成功抑制 0x07 补推 (修"图片与参数卡反复争抢")',
+          '_last_07_ts = time.time()' in _fin and 'else:' in _fin)
+    import re as _re
+    _nsi = open('installer/Alp-setup.nsi', encoding='utf-8', errors='replace').read()
+    check('NSIS: PawnIO 静默参数改为 -install -silent (修 /SILENT 弹错)',
+          '-install -silent' in _nsi and '/SILENT /NORESTART' not in _nsi)
+
     # --- 互斥必须**双向**同步: 配置 → 控件 (2026-10-11 用户反馈"状态栏开了工具箱没同步") ---
     print('=== 互斥双向同步 (配置→控件) ===')
     _sp3 = _SP2(dict(ctx))
