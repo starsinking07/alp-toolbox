@@ -296,6 +296,12 @@ class DeviceWorker(QThread):
             self._last_07_ts = now
             self._push_host_info07(cpu, gpu)
 
+        # ⚠️ 物理按键控制模式: **必须先读档再下发** —— 0x24 帧强制带档位, 若用上一轮的旧档位
+        # 下发, 就会把用户刚按的档位覆盖回去 (2026-10-11 用户反馈"物理按钮切换还是被覆盖":
+        # 旧顺序是 line300 先下发、line306 才读档, 于是按键永远追不上, 读到的也永远是主机
+        # 自己改回去的档位)。跟随模式下每 tick 都读 (不再 4s 节流), 保证下发用的是新鲜档位。
+        if self.config.button_follow_enabled:
+            self._gear_sync_tick(now, force=True)
         # 控制引擎
         self._control_tick(cpu, gpu, now)
 
@@ -1115,15 +1121,17 @@ class DeviceWorker(QThread):
             self._screen_queue.append({'key': key, 'want': want})
         # 磨损预算时间戳改由 _run_screen_upload 成功后记账 (审计 G19)
 
-    def _gear_sync_tick(self, now):
-        """0x25 轮询 (每 ~4s): 检测散热器物理按钮换档 → 工具箱按当前模式立即接管。
+    def _gear_sync_tick(self, now, force: bool = False):
+        """0x25 轮询: 检测散热器物理按钮换档。
 
-        v3.69 简化模型 (用户定案): 工具箱是唯一权威, 物理按钮的变更一律被当前模式
-        的输出覆盖回去 (智能变频=曲线目标, 手动=fixed_rpm) —— 不再做双向同步/
-        档位记忆/采纳持久化, 一劳永逸。"""
+        - **普通模式** (每 ~4s): v3.69 简化模型 —— 工具箱是唯一权威, 物理按钮的变更一律被
+          当前模式的输出覆盖回去 (智能变频=曲线目标, 手动=fixed_rpm), 不做双向同步。
+        - **物理按键控制模式** (force=True, 每 tick): 反过来 —— 档位归设备, 工具箱**跟随**。
+          必须在 `_control_tick` **之前**调用, 否则本 tick 会用旧档位下发而覆盖按键。
+        """
         if self._uploading or self._upload_req is not None or self._screen_queue:
             return
-        if now - self._last_0x25_poll < 4.0:
+        if not force and now - self._last_0x25_poll < 4.0:
             return
         self._last_0x25_poll = now
         try:

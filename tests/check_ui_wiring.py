@@ -374,6 +374,23 @@ check('设备写入走异步请求 (不在 GUI 线程做 USB 写)',
 check('开关切换不写设备 (只有改配置才写)',
       'request_button_push' not in _ins.getsource(ButtonPage._follow_toggled))
 
+# --- 跟随模式: 必须"先读档再下发", 否则会用旧档位把按键覆盖回去 (2026-10-11 用户反馈) ---
+_tick_src = _ins.getsource(_svc.DeviceWorker._tick)
+_i_read = _tick_src.find('_gear_sync_tick(now, force=True)')
+_i_ctrl = _tick_src.find('self._control_tick(cpu, gpu, now)')
+check('跟随模式先读档再下发 (顺序反了就会覆盖按键)',
+      0 <= _i_read < _i_ctrl)
+_gsrc = _ins.getsource(_svc.DeviceWorker._gear_sync_tick)
+check('档位轮询支持 force 绕过 4s 节流', 'force: bool = False' in _gsrc)
+check('force 时不受 4s 节流限制',
+      'if not force and now - self._last_0x25_poll < 4.0' in _gsrc)
+
+# --- 主题: 输入控件必须有禁用样式 (否则禁用了也看不出灰) ---
+_qss = th.build_qss(False)
+check('主题含 QComboBox:disabled (禁用要看得出来)',
+      'QComboBox:disabled' in _qss and 'QSpinBox:disabled' in _qss
+      and 'QLineEdit:disabled' in _qss)
+
 # ===== USB 读超时判定 (2026-10-08 修复: 旧判据对 USBTimeoutError 全失效) =====
 print('=== USB 读超时判定 ===')
 from brb02.device import _is_read_timeout

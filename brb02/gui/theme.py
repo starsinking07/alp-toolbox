@@ -231,6 +231,14 @@ QComboBox:hover, QSpinBox:hover, QLineEdit:hover {{ background: {t['muted']}; }}
 QComboBox:focus, QSpinBox:focus, QLineEdit:focus {{
     background: {t['card']}; border-color: {t['primary']};
 }}
+/* 禁用态 (2026-10-11): 此前输入控件没有 :disabled 规则 ⇒ 被禁用的下拉/数字框仍是正常配色,
+   完全看不出不可编辑 (物理按键页在"智能变频"档, "固定转速/常用转速"该变灰却没变灰)。
+   与滑条同一类问题 —— 禁用就要看得出来。 */
+QComboBox:disabled, QSpinBox:disabled, QLineEdit:disabled {{
+    background: {t['muted']}; color: {t['muted_fg']}; border-color: transparent;
+}}
+QComboBox::drop-down:disabled {{ border: none; }}
+QComboBox:disabled QAbstractItemView {{ background: {t['muted']}; }}
 QComboBox::drop-down {{ border: none; width: 22px; }}
 QSpinBox::up-button, QSpinBox::down-button {{
     width: 0; height: 0; border: none; background: transparent;
