@@ -335,7 +335,9 @@ check('改模式写进 cfg.button_profiles', cfg.button_profiles[1]['mode'] == '
 check('改转速写进 cfg.button_profiles', cfg.button_profiles[1]['rpm'] == 2500)
 check('曲线档禁用转速框、启用曲线编辑',
       not cvp.btn_rpm[1].isEnabled() and cvp.btn_edit[1].isEnabled())
-check('固定转速档反之 (LV1 默认 fixed)',
+cvp.btn_mode[0].setCurrentIndex(max(0, cvp.btn_mode[0].findData('fixed')))
+cvp._btn_profile_changed(0)      # 显式设成 fixed —— 不依赖配置初值 (沙箱会继承真实配置)
+check('固定转速档: 转速框可用、曲线按钮禁用',
       cvp.btn_rpm[0].isEnabled() and not cvp.btn_edit[0].isEnabled())
 check('引擎: 档位取设备值而非按转速反推', '_dev_level()' in _svc_src)
 check('引擎: TEC 自动档位在按键模式下跳过', 'cfg.button_follow_enabled' in _svc_src)
