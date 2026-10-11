@@ -271,6 +271,7 @@ class MainWindow(QMainWindow):
             self.wrappers[key] = self._wrap_scroll(page)
             self.stack.addWidget(self.wrappers[key])
         self.switch_page('status')
+        self.sync_mode_exclusivity()     # 启动即按互斥状态置灰各页的模式控件
 
         # 托盘 (原生 Win11 菜单: 信息行 + 温控曲线子菜单 + 智能变频)
         self.tray = QSystemTrayIcon(_make_app_icon())
@@ -507,6 +508,44 @@ class MainWindow(QMainWindow):
 
     def sync_curve_toggle(self, on: bool):
         self._tray_curve(on)
+        self.sync_mode_exclusivity()
+
+    def set_exclusive_mode(self, mode: str):
+        """把某个控制方式设为**唯一**生效, 其余自动关闭 (2026-10-11 用户要求)。
+
+        三种控制方式互斥: 物理按键控制 (档位归设备) / 智能变频 (曲线定目标) /
+        档位自动切换 (温度定档位)。"手动固定转速" = 三者都不开的兜底状态, 没有独立开关。
+        """
+        cfg = self.cfg
+        if mode == 'follow':
+            cfg.button_follow_enabled = True
+            cfg.curve_enabled = False
+            cfg.tec_auto_enabled = False
+        elif mode == 'curve':
+            cfg.curve_enabled = True
+            cfg.button_follow_enabled = False
+            cfg.tec_auto_enabled = False
+        elif mode == 'tec':
+            cfg.tec_auto_enabled = True
+            cfg.button_follow_enabled = False
+            cfg.curve_enabled = False
+        elif mode == 'manual':
+            cfg.curve_enabled = False
+            cfg.button_follow_enabled = False
+            cfg.tec_auto_enabled = False
+        cfg.save()
+        self.sync_mode_exclusivity()
+
+    def sync_mode_exclusivity(self):
+        """让每个页面按当前互斥状态刷新自己的控件 (置灰 + 说明原因)。"""
+        for key in ('status', 'curve', 'control', 'buttons'):
+            pg = self.pages.get(key)
+            fn = getattr(pg, 'sync_mode_state', None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:
+                    pass
 
     def refresh_curve_cache(self):
         self._curve_cache = None

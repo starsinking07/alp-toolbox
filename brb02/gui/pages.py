@@ -317,6 +317,17 @@ class StatusPage(QWidget):
                                  if self._last_gpu else prim)
         self.gauge_fan.set_color(prim)
 
+    def sync_mode_state(self):
+        """控制方式互斥: 被别的模式顶掉时置灰本页的智能变频开关 (2026-10-11 用户要求)。"""
+        cfg = self.ctx['cfg']
+        blocked, why = False, ''
+        if getattr(cfg, 'button_follow_enabled', False):
+            blocked, why = True, '已开启「物理按键控制」—— 智能变频开关已停用'
+        elif getattr(cfg, 'tec_auto_enabled', False):
+            blocked, why = True, '已开启「档位自动切换」—— 智能变频开关已停用'
+        self.tgl_smart.setEnabled(not blocked)
+        self.tgl_smart.setToolTip(why)
+
     def sync_smart(self, on: bool):
         self.tgl_smart.blockSignals(True)
         self.tgl_smart.setChecked(on)
@@ -348,8 +359,13 @@ class StatusPage(QWidget):
             self.btn_disconnect.setText('断开')
 
     def _smart_toggled(self, on):
-        self.ctx['cfg'].curve_enabled = on
-        self.ctx['cfg'].save()
+        if on:
+            # 互斥 (2026-10-11): 开启智能变频会自动关掉"物理按键控制/档位自动切换"并置灰
+            self.ctx['main'].set_exclusive_mode('curve')
+        else:
+            self.ctx['cfg'].curve_enabled = False
+            self.ctx['cfg'].save()
+            self.ctx['main'].sync_mode_exclusivity()
         self.ctx['main'].sync_curve_toggle(on)
 
     def on_status(self, st: dict):
@@ -728,6 +744,12 @@ class CurvePage(QWidget):
         prow.addWidget(btn_reset)
         pv.addLayout(prow)
         v.addWidget(prof)
+        self.card_prof = prof
+        # 控制方式互斥提示 (2026-10-11): 被别的模式顶掉时在这里说明原因
+        self.lbl_mode_hint = QLabel('')
+        self.lbl_mode_hint.setObjectName('CardHint')
+        self.lbl_mode_hint.setWordWrap(True)
+        pv.addWidget(self.lbl_mode_hint)
 
         # 手动挡位
         gears, _, gv = _card('手动挡位', '点击挡位或 15 点滑条立即下发固定转速')
@@ -767,6 +789,7 @@ class CurvePage(QWidget):
         self.lbl_manual_hint.setWordWrap(True)
         gv.addWidget(self.lbl_manual_hint)
         v.addWidget(gears)
+        self.card_gears = gears
         self._sync_manual_enabled()
 
         # 曲线编辑器
@@ -780,6 +803,7 @@ class CurvePage(QWidget):
         tip.setObjectName('CardHint')
         ev_.addWidget(tip)
         v.addWidget(editor)
+        self.card_editor = editor
 
 
         # 智能启停 + 学习 + 预判 (网格两列)
@@ -951,17 +975,45 @@ class CurvePage(QWidget):
         self.ctx['cfg'].save()
         self.gear_btns[gear].setChecked(True)        # 滑条 → 挡位卡同步 (基础挡位)
 
+    def _mode_blocked_by(self):
+        """本页的模式控件是否被别的控制方式顶掉; 返回 (是否禁用, 原因文案)。"""
+        cfg = self.ctx['cfg']
+        if getattr(cfg, 'button_follow_enabled', False):
+            return True, ('已开启「物理按键控制」—— 档位与目标转速改由「按键」页的各档配置决定，'
+                          '本页的智能变频 / 手动挡位不再生效。')
+        if getattr(cfg, 'tec_auto_enabled', False):
+            return True, ('已开启「档位自动切换」—— 档位改由温度决定，'
+                          '本页的智能变频 / 手动挡位不再生效。')
+        return False, ''
+
+    def sync_mode_state(self):
+        """控制方式互斥: 被别的模式顶掉时本页模式控件置灰 + 说明原因 (2026-10-11 用户要求)。"""
+        blocked, why = self._mode_blocked_by()
+        try:
+            self.tgl_smart2.setEnabled(not blocked)
+            self.card_editor.setEnabled(not blocked)
+        except AttributeError:
+            pass
+        self.lbl_mode_hint.setText(why)
+        self._sync_manual_enabled()
+
     def _sync_manual_enabled(self):
-        """智能变频开启时手动挡位禁用 (自动控温时手动调挡会被曲线覆盖)。"""
-        on = bool(self.ctx['cfg'].curve_enabled)
+        """手动挡位禁用条件: 智能变频开启 (会被曲线覆盖), 或被别的控制方式顶掉。"""
+        blocked, _ = self._mode_blocked_by()
+        on = bool(self.ctx['cfg'].curve_enabled) or blocked
         for b in self.gear_btns:
             b.setEnabled(not on)
         self.slider12.setEnabled(not on)
         self.lbl_manual_hint.setVisible(on)
 
     def _smart_toggled(self, on):
-        self.ctx['cfg'].curve_enabled = on
-        self.ctx['cfg'].save()
+        if on:
+            # 互斥 (2026-10-11): 开启智能变频会自动关掉"物理按键控制/档位自动切换"并置灰
+            self.ctx['main'].set_exclusive_mode('curve')
+        else:
+            self.ctx['cfg'].curve_enabled = False
+            self.ctx['cfg'].save()
+            self.ctx['main'].sync_mode_exclusivity()
         self.ctx['main'].sync_curve_toggle(on)
         self._sync_manual_enabled()
 
@@ -1202,6 +1254,10 @@ class ButtonPage(QWidget):
         if getattr(self, 'tgl_follow', None) is not None and self.tgl_follow.isChecked():
             self._update_level()
 
+    def sync_mode_state(self):
+        """控制方式互斥: 本页是模式持有者, 只需按总开关刷新自身启用态。"""
+        self._sync_enabled()
+
     def _on_gear_changed(self, lvl, rpm):
         """worker 报来物理按键换档 → 立即刷新档位显示。"""
         if getattr(self, 'tgl_follow', None) is not None and self.tgl_follow.isChecked():
@@ -1338,21 +1394,22 @@ class ButtonPage(QWidget):
 
     def _follow_toggled(self, on):
         cfg = self.cfg
-        cfg.button_follow_enabled = bool(on)
+        main = self.ctx.get('main')
         if on:
-            cfg.tec_auto_enabled = False       # 与档位自动化互斥 (两者都改档位)
-        cfg.save()
+            # 互斥 (2026-10-11 用户要求): 开启按键控制会自动关掉"智能变频/档位自动切换"并置灰
+            if main is not None and hasattr(main, 'set_exclusive_mode'):
+                main.set_exclusive_mode('follow')
+            else:                                     # 无主窗口 (自检环境) 时退化为直接改配置
+                cfg.button_follow_enabled = True
+                cfg.curve_enabled = False
+                cfg.tec_auto_enabled = False
+                cfg.save()
+        else:
+            cfg.button_follow_enabled = False
+            cfg.save()
+            if main is not None and hasattr(main, 'sync_mode_exclusivity'):
+                main.sync_mode_exclusivity()
         self._sync_enabled()
-        # 控制页的 TEC 自动档位开关同步置灰 (避免用户以为它还在生效)
-        try:
-            main = self.ctx.get('main')
-            ctl = getattr(main, 'pages', {}).get('control') if main else None
-            if ctl is not None and hasattr(ctl, 'tgl_tec'):
-                ctl.tgl_tec.blockSignals(True)
-                ctl.tgl_tec.setChecked(bool(cfg.tec_auto_enabled))
-                ctl.tgl_tec.blockSignals(False)
-        except Exception:
-            pass
         # ⚠️ 开关切换**不写设备**: 默认配置是 4 档都 1200 RPM, 一开就写会覆盖设备出厂的
         # 四档转速。只有用户主动改某一档时才写那一档 (见 _commit)。
 
@@ -1539,11 +1596,13 @@ class ControlPage(QWidget):
         card2, _, cv2 = _card('风扇控制')
         self.tgl_curve = Toggle(cfg.curve_enabled)
         self.tgl_curve.toggled = self._curve_toggled
-        cv2.addWidget(_setting_row('自动温度控制', '根据温度曲线自动调节风扇速度', '🎚️', self.tgl_curve))
+        self.row_curve = _setting_row('自动温度控制', '根据温度曲线自动调节风扇速度', '🎚️', self.tgl_curve)
+        cv2.addWidget(self.row_curve)
         # 档位自动切换 (官方档名: 低噪/平衡/强效/超频; 设备为纯风冷, 无制冷片)
         self.tgl_tec = Toggle(cfg.tec_auto_enabled)
         self.tgl_tec.toggled = self._tec_toggled
-        cv2.addWidget(_setting_row('档位自动切换', '风扇档位随温度自动升/降 (低噪→平衡→强效→超频)', '🌀', self.tgl_tec))
+        self.row_tec = _setting_row('档位自动切换', '风扇档位随温度自动升/降 (低噪→平衡→强效→超频)', '🌀', self.tgl_tec)
+        cv2.addWidget(self.row_tec)
         thr_w = QWidget()
         th = QHBoxLayout(thr_w)
         th.setContentsMargins(0, 0, 0, 0)
@@ -1839,8 +1898,21 @@ class ControlPage(QWidget):
 
     def _tec_toggled(self, on):
         cfg = self.ctx['cfg']
-        cfg.tec_auto_enabled = on
-        cfg.save()
+        if on:
+            self.ctx['main'].set_exclusive_mode('tec')     # 互斥: 自动关掉按键控制/智能变频
+        else:
+            cfg.tec_auto_enabled = False
+            cfg.save()
+            self.ctx['main'].sync_mode_exclusivity()
+        self._sync_setting_deps()
+
+    def sync_mode_state(self):
+        """控制方式互斥 (2026-10-11 用户要求): 物理按键控制开启时, 本页两个自动开关置灰 + 说明。"""
+        follow = bool(getattr(self.ctx['cfg'], 'button_follow_enabled', False))
+        why = ('已开启「物理按键控制」—— 档位由设备物理按键决定，此处自动档位已停用'
+               if follow else '')
+        _dim_widget(self.row_curve, follow, why)
+        _dim_widget(self.row_tec, follow, why)
         self._sync_setting_deps()
 
     def _sync_setting_deps(self):
@@ -1928,8 +2000,12 @@ class ControlPage(QWidget):
         self.ctx['worker'].request_reconnect(self.ctx['cfg'].conn_type)
 
     def _curve_toggled(self, on):
-        self.ctx['cfg'].curve_enabled = on
-        self.ctx['cfg'].save()
+        if on:
+            self.ctx['main'].set_exclusive_mode('curve')   # 互斥: 自动关掉按键控制/档位自动
+        else:
+            self.ctx['cfg'].curve_enabled = False
+            self.ctx['cfg'].save()
+            self.ctx['main'].sync_mode_exclusivity()
         self.ctx['main'].sync_curve_toggle(on)
         self._sync_setting_deps()
 

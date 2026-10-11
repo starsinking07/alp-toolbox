@@ -406,6 +406,50 @@ if _MW2 is not None:
     check('换档提示区分"跟随/接管" (不再一律说"已接管")',
           'button_follow_enabled' in _odg and '跟随' in _odg)
 
+    # --- 控制方式互斥 (2026-10-11 用户要求: 开启一个, 其余置灰 + 说明原因) ---
+    print('=== 控制方式互斥 ===')
+    check('主窗口有 set_exclusive_mode / sync_mode_exclusivity',
+          hasattr(_MW2, 'set_exclusive_mode') and hasattr(_MW2, 'sync_mode_exclusivity'))
+    _em = _ins.getsource(_MW2.set_exclusive_mode)
+    check('互斥: 三种模式互相排斥', all(k in _em for k in ("'follow'", "'curve'", "'tec'")))
+    from brb02.gui.pages import StatusPage as _SP2
+    check('各页都有 sync_mode_state (统一置灰入口)',
+          all(hasattr(c, 'sync_mode_state')
+              for c in (_SP2, _CP2, ControlPage, ButtonPage)))
+    check('曲线页: 被顶掉时置灰智能变频开关 + 给原因',
+          'tgl_smart2.setEnabled' in _ins.getsource(_CP2.sync_mode_state)
+          and 'lbl_mode_hint' in _ins.getsource(_CP2.sync_mode_state))
+    check('控制页: 被顶掉时置灰两个自动开关 + 给原因',
+          'row_curve' in _ins.getsource(ControlPage.sync_mode_state)
+          and 'row_tec' in _ins.getsource(ControlPage.sync_mode_state))
+
+    class _FakeMain:
+        cfg = cfg
+        pages = {}
+
+        def set_exclusive_mode(self, mode):
+            _MW2.set_exclusive_mode(self, mode)
+
+        def sync_mode_exclusivity(self):
+            pass
+
+    _fm = _FakeMain()
+    cfg.curve_enabled = True
+    cfg.tec_auto_enabled = True
+    cfg.button_follow_enabled = False
+    _fm.set_exclusive_mode('follow')
+    check('开「物理按键控制」→ 自动关掉智能变频 + 档位自动切换',
+          cfg.button_follow_enabled and not cfg.curve_enabled and not cfg.tec_auto_enabled)
+    _fm.set_exclusive_mode('curve')
+    check('开「智能变频」→ 自动关掉按键控制 + 档位自动切换',
+          cfg.curve_enabled and not cfg.button_follow_enabled and not cfg.tec_auto_enabled)
+    _fm.set_exclusive_mode('tec')
+    check('开「档位自动切换」→ 自动关掉按键控制 + 智能变频',
+          cfg.tec_auto_enabled and not cfg.button_follow_enabled and not cfg.curve_enabled)
+    _fm.set_exclusive_mode('manual')
+    check('切回「手动」→ 三者全关',
+          not cfg.tec_auto_enabled and not cfg.button_follow_enabled and not cfg.curve_enabled)
+
 # ===== USB 读超时判定 (2026-10-08 修复: 旧判据对 USBTimeoutError 全失效) =====
 print('=== USB 读超时判定 ===')
 from brb02.device import _is_read_timeout
