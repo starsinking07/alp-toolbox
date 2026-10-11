@@ -52,7 +52,8 @@ class _W(QObject):
     def read_param_page_layout(self): return None
     def set_lcd_switch(self, on): self._lcd = bool(on); return bool(on)
     def get_lcd_switch_status(self): return True
-    def push_button_profiles(self): return 4          # 物理按键控制: 写设备档位槽 (stub)
+    def push_button_profiles(self, only=0): return 4  # 物理按键控制: 写设备档位槽 (stub)
+    def request_button_push(self, level=0): self._btn_push = level   # 异步请求 (stub)
     def read_device_button_profiles(self): return 4   # 物理按键控制: 从设备读回 4 档 (stub)
 
 cfg = Config.load(); cfg.dark = False
@@ -312,42 +313,64 @@ check('两条上传路径都把 flow_control 传下去了 (旧版无人传 ⇒ �
 check('失败重传切流控 (兑现发布说明承诺的"自动回落")',
       _svc_src.count('_once(flow=True)') >= 2)
 
-# ===== CurvePage: 物理按键控制模式 (2026-10-11) =====
-print('=== CurvePage 物理按键控制 ===')
-from brb02.gui.pages import CurvePage
-cvp = CurvePage(dict(ctx))
-check('有「跟随物理按键」总开关', hasattr(cvp, 'tgl_btn_follow'))
-check('有 4 档位行 (模式 / 转速 / 编辑曲线)',
-      len(cvp.btn_mode) == 4 and len(cvp.btn_rpm) == 4 and len(cvp.btn_edit) == 4)
+# ===== ButtonPage: 物理按键控制 (2026-10-11, 独立分区) =====
+print('=== ButtonPage 物理按键控制 ===')
+from brb02.gui.pages import ButtonPage, CurvePage as _CP2
+bp = ButtonPage(dict(ctx))
+check('独立页面存在 + 有总开关', hasattr(bp, 'tgl_follow'))
+check('有 4 档位行 (模式 / 转速 / 预设 / 编辑曲线)',
+      len(bp.cmb_mode) == 4 and len(bp.spin_rpm) == 4
+      and len(bp.cmb_preset) == 4 and len(bp.btn_edit) == 4)
 check('有该档曲线编辑器 + 档位标签',
-      hasattr(cvp, 'btn_curve') and hasattr(cvp, 'lbl_btn_level'))
-cvp.tgl_btn_follow.setChecked(False)
-cvp._btn_sync_enabled()
+      hasattr(bp, 'curve') and hasattr(bp, 'lbl_level'))
+check('有「从设备读取 4 档曲线」按钮', hasattr(bp, 'btn_read'))
+check('有预设曲线下拉 (设备四档 + 静音)',
+      hasattr(bp, 'cmb_curve_preset') and bp.cmb_curve_preset.count() == 6)
+check('转速预设齐全 (静音/标准/强劲/超频/极限)', bp.cmb_preset[0].count() == 6)
+bp.tgl_follow.setChecked(False)
+bp._sync_enabled()
 check('未开启跟随时整卡禁用 (防误改)',
-      not cvp.btn_mode[0].isEnabled() and not cvp.btn_curve.isEnabled())
-cvp.tgl_btn_follow.setChecked(True)
-cvp._btn_sync_enabled()
-check('开启后整卡可用', cvp.btn_mode[0].isEnabled() and cvp.btn_curve.isEnabled())
-cvp.btn_mode[1].setCurrentIndex(max(0, cvp.btn_mode[1].findData('curve')))
-cvp.btn_rpm[1].setValue(2500)
-cvp._btn_profile_changed(1)
-check('改模式写进 cfg.button_profiles', cfg.button_profiles[1]['mode'] == 'curve')
-check('改转速写进 cfg.button_profiles', cfg.button_profiles[1]['rpm'] == 2500)
+      not bp.cmb_mode[0].isEnabled() and not bp.curve.isEnabled())
+bp.tgl_follow.setChecked(True)
+bp._sync_enabled()
+check('开启后整卡可用', bp.cmb_mode[0].isEnabled() and bp.curve.isEnabled())
+bp.cmb_mode[1].setCurrentIndex(max(0, bp.cmb_mode[1].findData('curve')))
+bp.spin_rpm[1].setValue(2500)
+bp._row_changed(1)
+check('输入不即时落盘 (走 debounce 计时器)', bp._save_timer.isActive())
+bp._commit()
+check('debounce 到期后才写进 cfg.button_profiles',
+      cfg.button_profiles[1]['mode'] == 'curve' and cfg.button_profiles[1]['rpm'] == 2500)
 check('曲线档禁用转速框、启用曲线编辑',
-      not cvp.btn_rpm[1].isEnabled() and cvp.btn_edit[1].isEnabled())
-cvp.btn_mode[0].setCurrentIndex(max(0, cvp.btn_mode[0].findData('fixed')))
-cvp._btn_profile_changed(0)      # 显式设成 fixed —— 不依赖配置初值 (沙箱会继承真实配置)
+      not bp.spin_rpm[1].isEnabled() and bp.btn_edit[1].isEnabled())
+bp.cmb_mode[0].setCurrentIndex(max(0, bp.cmb_mode[0].findData('fixed')))
+bp._row_changed(0)
+bp._commit()
 check('固定转速档: 转速框可用、曲线按钮禁用',
-      cvp.btn_rpm[0].isEnabled() and not cvp.btn_edit[0].isEnabled())
+      bp.spin_rpm[0].isEnabled() and not bp.btn_edit[0].isEnabled())
+check('转速框关掉键盘跟踪 (打字中途不触发落盘)',
+      not bp.spin_rpm[0].keyboardTracking())
+bp.cmb_preset[2].setCurrentIndex(max(0, bp.cmb_preset[2].findData(2100)))
+bp._preset_picked(2)
+bp._commit()
+check('常用转速预设一键填入', cfg.button_profiles[2]['rpm'] == 2100)
+bp._edit_idx = 3
+bp.cmb_curve_preset.setCurrentIndex(1)          # 设备 LV1 低噪
+bp._curve_preset_picked(1)
+check('预设曲线一键套用 + 模式同步为智能变频',
+      cfg.button_profiles[3]['mode'] == 'curve'
+      and cfg.button_profiles[3]['curve'][0] == [20, 1200])
+check('曲线页已不再包含按键卡片 (独立成区)',
+      not hasattr(_CP2, 'tgl_btn_follow'))
 check('引擎: 档位取设备值而非按转速反推', '_dev_level()' in _svc_src)
 check('引擎: TEC 自动档位在按键模式下跳过', 'cfg.button_follow_enabled' in _svc_src)
 check('引擎: 目标按档位配置取 (固定/该档曲线)', '_button_profile' in _svc_src)
-check('有写设备档位槽的方法', hasattr(_svc.DeviceWorker, 'push_button_profiles'))
-check('有「从设备读取 4 档曲线」按钮 (防默认值压平出厂差异)',
-      hasattr(cvp, 'btn_read_dev') and hasattr(_svc.DeviceWorker, 'read_device_button_profiles'))
+check('设备写入走异步请求 (不在 GUI 线程做 USB 写)',
+      hasattr(_svc.DeviceWorker, 'request_button_push')
+      and hasattr(_svc.DeviceWorker, 'push_button_profiles')
+      and 'request_button_push' in _ins.getsource(ButtonPage._commit))
 check('开关切换不写设备 (只有改配置才写)',
-      '_btn_follow_toggled' in _ins.getsource(CurvePage)
-      and 'push_button_profiles' not in _ins.getsource(CurvePage._btn_follow_toggled))
+      'request_button_push' not in _ins.getsource(ButtonPage._follow_toggled))
 
 # ===== USB 读超时判定 (2026-10-08 修复: 旧判据对 USBTimeoutError 全失效) =====
 print('=== USB 读超时判定 ===')

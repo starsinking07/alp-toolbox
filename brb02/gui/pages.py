@@ -781,73 +781,6 @@ class CurvePage(QWidget):
         ev_.addWidget(tip)
         v.addWidget(editor)
 
-        # ---- 物理按键控制模式 (0.1.10): 档位归设备按键, 工具箱「跟随」 ----
-        btnc, _, bv = _card(
-            '物理按键控制',
-            '开启后**档位归散热器物理按键**（工具箱不再主动换档），本卡为 LV1-LV4 各档分别指定'
-            '行为：固定转速，或该档**自己**的智能变频曲线。换档由工具箱每 4 秒轮询 0x25 跟随'
-            '（最多滞后约 4 秒）；固定转速会写进设备档位槽，不开工具箱设备也保持。')
-        self.tgl_btn_follow = Toggle(bool(getattr(cfg, 'button_follow_enabled', False)))
-        self.tgl_btn_follow.toggled = self._btn_follow_toggled
-        bv.addWidget(_setting_row('跟随物理按键', '开启后 TEC 自动档位停用（档位只由设备决定）',
-                                  '🎛️', self.tgl_btn_follow))
-
-        self.lbl_btn_level = QLabel('当前设备档位：—')
-        self.lbl_btn_level.setObjectName('CardHint')
-        bv.addWidget(self.lbl_btn_level)
-
-        self.btn_read_dev = QPushButton('从设备读取 4 档曲线（建议先点一次）')
-        self.btn_read_dev.setToolTip(
-            '设备出厂时四档曲线各不相同（LV1 低噪 → LV4 超频），而本卡默认值是四档都固定 1200\n'
-            '—— 直接开启会把出厂差异压平。先点这里把设备四档曲线读回来作为初始配置，\n'
-            '各档即等于设备原生行为，再逐档微调。')
-        self.btn_read_dev.clicked.connect(self._btn_read_from_device)
-        bv.addWidget(self.btn_read_dev)
-
-        bgrid = QGridLayout()
-        bgrid.setHorizontalSpacing(12)
-        bgrid.setVerticalSpacing(8)
-        for _c, _h in enumerate(('档位', '该档行为', '固定转速', '智能变频曲线')):
-            _lab = QLabel(_h)
-            _lab.setObjectName('CardHint')
-            bgrid.addWidget(_lab, 0, _c)
-        self.btn_mode, self.btn_rpm, self.btn_edit = [], [], []
-        for _i in range(4):
-            _lab = QLabel(f'LV{_i + 1}')
-            _lab.setObjectName('StatVal')
-            bgrid.addWidget(_lab, _i + 1, 0)
-            _cmb = QComboBox()
-            _cmb.addItem('固定转速', 'fixed')
-            _cmb.addItem('智能变频', 'curve')
-            _cmb.setMinimumWidth(118)
-            _cmb.currentIndexChanged.connect(lambda _x, k=_i: self._btn_profile_changed(k))
-            bgrid.addWidget(_cmb, _i + 1, 1)
-            self.btn_mode.append(_cmb)
-            _sp = QSpinBox()
-            _sp.setRange(0, MAX_RPM)
-            _sp.setSingleStep(100)
-            _sp.setSuffix(' RPM')
-            _sp.setMinimumWidth(110)
-            _sp.valueChanged.connect(lambda _x, k=_i: self._btn_profile_changed(k))
-            bgrid.addWidget(_sp, _i + 1, 2)
-            self.btn_rpm.append(_sp)
-            _eb = QPushButton('编辑曲线')
-            _eb.clicked.connect(lambda _c=False, k=_i: self._btn_edit_curve(k))
-            bgrid.addWidget(_eb, _i + 1, 3)
-            self.btn_edit.append(_eb)
-        bv.addLayout(bgrid)
-
-        self.btn_curve = CurveEditor(self.dark)
-        self.btn_curve.changed = self._btn_curve_changed
-        self.btn_curve.setMinimumHeight(170)
-        bv.addWidget(self.btn_curve)
-        self.lbl_btn_editing = QLabel('')
-        self.lbl_btn_editing.setObjectName('CardHint')
-        bv.addWidget(self.lbl_btn_editing)
-        self._btn_edit_idx = 0
-        # 放到「方案」之后 (顶部): 这是**模式级**开关, 埋在曲线编辑器下方没人找得到
-        v.insertWidget(v.indexOf(prof) + 1, btnc)
-        self._btn_load_ui()
 
         # 智能启停 + 学习 + 预判 (网格两列)
         row_cards = QHBoxLayout()
@@ -1047,103 +980,6 @@ class CurvePage(QWidget):
         self.ctx['main'].refresh_curve_cache()
         self._update_offsets_label()
 
-    # ---- 物理按键控制模式 (0.1.10) ----
-    def _btn_load_ui(self):
-        """配置 → 控件回填 (构造时 / 改档位后 / 开关切换后)。"""
-        cfg = self.ctx['cfg']
-        profs = getattr(cfg, 'button_profiles', None) or []
-        for i in range(4):
-            p = profs[i] if i < len(profs) and isinstance(profs[i], dict) else {}
-            cmb, sp, eb = self.btn_mode[i], self.btn_rpm[i], self.btn_edit[i]
-            cmb.blockSignals(True)
-            sp.blockSignals(True)
-            cmb.setCurrentIndex(max(0, cmb.findData(p.get('mode', 'fixed'))))
-            sp.setValue(int(p.get('rpm') or 0))
-            cmb.blockSignals(False)
-            sp.blockSignals(False)
-            is_curve = p.get('mode') == 'curve'
-            sp.setEnabled(not is_curve)
-            eb.setEnabled(is_curve)
-        self._btn_show_curve(self._btn_edit_idx)
-        self._btn_sync_enabled()
-
-    def _btn_sync_enabled(self):
-        """整卡随总开关启用/禁用; 每行再按该档模式细化 (固定转速档禁用曲线按钮, 反之亦然)。"""
-        on = self.tgl_btn_follow.isChecked()
-        for w in (self.lbl_btn_level, self.btn_curve, self.lbl_btn_editing):
-            w.setEnabled(on)
-        profs = getattr(self.ctx['cfg'], 'button_profiles', None) or []
-        for i in range(4):
-            p = profs[i] if i < len(profs) and isinstance(profs[i], dict) else {}
-            is_curve = p.get('mode') == 'curve'
-            self.btn_mode[i].setEnabled(on)
-            self.btn_rpm[i].setEnabled(on and not is_curve)
-            self.btn_edit[i].setEnabled(on and is_curve)
-        if not on:
-            self.lbl_btn_level.setText('当前设备档位：—（未开启跟随）')
-        else:
-            self._btn_update_level_label()
-
-    def _btn_update_level_label(self):
-        lvl = getattr(self.ctx['worker'], '_last_dev_level', None)
-        lvl = int(lvl) if isinstance(lvl, int) and 1 <= lvl <= 4 else 1
-        prof = (getattr(self.ctx['cfg'], 'button_profiles', None) or [{}])[lvl - 1]
-        desc = ('固定 %s RPM' % prof.get('rpm')) if prof.get('mode') != 'curve' else '智能变频（该档曲线）'
-        self.lbl_btn_level.setText(f'当前设备档位：LV{lvl} → {desc}')
-
-    def _btn_show_curve(self, idx):
-        p = (getattr(self.ctx['cfg'], 'button_profiles', None) or [{}] * 4)[idx]
-        self.btn_curve.set_curve(p.get('curve') or [])
-        self.lbl_btn_editing.setText(
-            f'正在编辑 LV{idx + 1} 的曲线 —— 拖动圆点即改, 自动保存并即时生效')
-        self._btn_edit_idx = idx
-
-    def _btn_edit_curve(self, idx):
-        self._btn_show_curve(idx)
-
-    def _btn_read_from_device(self):
-        """把设备四档曲线读回来当初始配置 (= 设备出厂行为, 避免默认值把四档压平)。"""
-        n = self.ctx['worker'].read_device_button_profiles()
-        self._btn_load_ui()
-        self.lbl_btn_editing.setText(
-            f'已从设备读回 {n}/4 档曲线作为初始配置（= 设备出厂行为，可逐档微调）'
-            if n else '读取失败：设备未连接？详见「关于」页日志')
-
-    def _btn_curve_changed(self, pct_list):
-        cfg = self.ctx['cfg']
-        i = getattr(self, '_btn_edit_idx', 0)
-        cfg.button_profiles[i]['curve'] = [
-            [t, int(p / 100 * MAX_RPM)] for t, p in zip(TEMPS, pct_list)]
-        cfg.save()
-        self.ctx['worker'].push_button_profiles()   # 曲线由主机驱动, 这里只存配置
-
-    def _btn_profile_changed(self, idx):
-        cfg = self.ctx['cfg']
-        cfg.button_profiles[idx]['mode'] = self.btn_mode[idx].currentData()
-        cfg.button_profiles[idx]['rpm'] = int(self.btn_rpm[idx].value())
-        cfg.save()
-        self._btn_load_ui()
-        self.ctx['worker'].push_button_profiles()   # 固定转速档写进设备档位槽
-
-    def _btn_follow_toggled(self, on):
-        cfg = self.ctx['cfg']
-        cfg.button_follow_enabled = bool(on)
-        if on:
-            cfg.tec_auto_enabled = False       # 与档位自动化互斥 (两者都改档位)
-        cfg.save()
-        self._btn_sync_enabled()
-        # 控制页的 TEC 自动档位开关同步置灰 (避免用户以为它还在生效)
-        try:
-            main = self.ctx.get('main')
-            ctl = getattr(main, 'pages', {}).get('control') if main else None
-            if ctl is not None and hasattr(ctl, 'tgl_tec'):
-                ctl.tgl_tec.blockSignals(True)
-                ctl.tgl_tec.setChecked(bool(cfg.tec_auto_enabled))
-                ctl.tgl_tec.blockSignals(False)
-        except Exception:
-            pass
-        # ⚠️ 开关切换**不写设备**: 默认配置是 4 档都 1200 RPM, 一开就写会覆盖设备出厂的
-        # 四档转速。只有用户主动改某一档时才写那一档 (见 _btn_profile_changed)。
 
     def _reset(self):
         cfg = self.ctx['cfg']
@@ -1197,8 +1033,6 @@ class CurvePage(QWidget):
         self.hist_chart.update()
         self._update_offsets_label()
         self._update_hist_tiles()
-        if getattr(self, 'tgl_btn_follow', None) is not None and self.tgl_btn_follow.isChecked():
-            self._btn_update_level_label()      # 物理按键模式: 刷新当前设备档位显示
 
     def _update_hist_tiles(self):
         """峰值/平均瓦片: 从最近 30 分钟历史计算 (v3.55 补齐: 构造后从未更新过)。"""
@@ -1229,6 +1063,285 @@ class CurvePage(QWidget):
 
 
 # ================= 设置页 (控制页) =================
+class ButtonPage(QWidget):
+    """物理按键控制页 (0.1.10): 档位归散热器物理按键, 工具箱「跟随」; LV1-LV4 各档独立配置。
+
+    与旧版 (塞在曲线页底部) 的三点改进:
+    1. **不卡**: 转速输入走 500ms debounce, 只在停止输入后写配置; 设备写入交给 worker 线程
+       (GUI 线程直接写 4 档要 ~1.5s); 单行同步不再重建整卡。
+    2. **转速输入**: 后缀不再被选中; 每行带常用预设 (静音/标准/强劲/超频/极限)。
+    3. **预设曲线**: 一键套用设备四档出厂曲线或静音曲线, 套完仍可拖圆点微调。
+    """
+
+    RPM_PRESETS = (('静音 1100', 1100), ('标准 1600', 1600), ('强劲 2100', 2100),
+                   ('超频 4000', 4000), ('极限 4800', 4800))
+    # 前四条 = 设备四档出厂曲线 (2026-10-11 真机 0x26 form=1 读回, 逐档递增)
+    CURVE_PRESETS = (
+        ('设备 LV1 低噪', [(20, 1200), (40, 1512), (60, 2134), (80, 2756)]),
+        ('设备 LV2 平衡', [(20, 1512), (40, 2134), (60, 2756), (80, 3378)]),
+        ('设备 LV3 强效', [(20, 1823), (40, 2445), (60, 3378), (80, 4000)]),
+        ('设备 LV4 超频', [(20, 2134), (40, 3067), (60, 4000), (80, 4000)]),
+        ('静音 (低转速)', [(20, 800), (40, 1000), (60, 1400), (80, 1800)]),
+    )
+
+    def __init__(self, ctx, parent=None):
+        super().__init__(parent)
+        self.ctx = ctx
+        self.cfg = ctx['cfg']
+        self.dark = ctx.get('dark', False)
+        self._edit_idx = 0
+        v = QVBoxLayout(self)
+        v.setContentsMargins(6, 4, 6, 6)
+        v.setSpacing(16)
+        head = QLabel('物理按键控制')
+        head.setObjectName('PageTitle')
+        v.addWidget(head)
+
+        # 转速输入的 debounce: 停止输入 500ms 后才落盘/写设备 (旧版每敲一键都写, 卡)
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(500)
+        self._save_timer.timeout.connect(self._commit)
+        self._pending = None          # 待提交的档位下标
+
+        card, _, cv = _card(
+            '跟随物理按键',
+            '开启后**档位归散热器物理按键**（工具箱不再主动换档），下面为 LV1-LV4 各档分别指定'
+            '行为：固定转速，或该档**自己**的智能变频曲线。换档由工具箱每 4 秒轮询 0x25 跟随'
+            '（最多滞后约 4 秒）；固定转速会写进设备档位槽，不开工具箱设备也保持。')
+        self.tgl_follow = Toggle(bool(getattr(self.cfg, 'button_follow_enabled', False)))
+        self.tgl_follow.toggled = self._follow_toggled
+        cv.addWidget(_setting_row('跟随物理按键', '开启后 TEC 自动档位停用（档位只由设备决定）',
+                                  '🎛️', self.tgl_follow))
+
+        self.lbl_level = QLabel('当前设备档位：—')
+        self.lbl_level.setObjectName('CardHint')
+        cv.addWidget(self.lbl_level)
+
+        self.btn_read = QPushButton('从设备读取 4 档曲线（建议先点一次）')
+        self.btn_read.setToolTip(
+            '设备出厂时四档曲线各不相同（LV1 低噪 → LV4 超频），而默认值是四档都固定 1200\n'
+            '—— 直接开启会把出厂差异压平。先点这里把设备四档曲线读回来作为初始配置，\n'
+            '各档即等于设备原生行为，再逐档微调。')
+        self.btn_read.clicked.connect(self._read_from_device)
+        cv.addWidget(self.btn_read)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        for c, h in enumerate(('档位', '该档行为', '固定转速', '常用转速', '智能变频曲线')):
+            lab = QLabel(h)
+            lab.setObjectName('CardHint')
+            grid.addWidget(lab, 0, c)
+        self.cmb_mode, self.spin_rpm, self.cmb_preset, self.btn_edit = [], [], [], []
+        for i in range(4):
+            lab = QLabel(f'LV{i + 1}')
+            lab.setObjectName('StatVal')
+            grid.addWidget(lab, i + 1, 0)
+            cmb = QComboBox()
+            cmb.addItem('固定转速', 'fixed')
+            cmb.addItem('智能变频', 'curve')
+            cmb.setMinimumWidth(112)
+            cmb.currentIndexChanged.connect(lambda _x, k=i: self._row_changed(k))
+            grid.addWidget(cmb, i + 1, 1)
+            self.cmb_mode.append(cmb)
+            sp = QSpinBox()
+            sp.setRange(0, MAX_RPM)
+            sp.setSingleStep(100)
+            sp.setSuffix(' RPM')
+            sp.setMinimumWidth(108)
+            sp.setKeyboardTracking(False)      # ← 关键: 打字过程不触发 valueChanged (防中途值落盘)
+            sp.valueChanged.connect(lambda _x, k=i: self._row_changed(k))
+            grid.addWidget(sp, i + 1, 2)
+            self.spin_rpm.append(sp)
+            pc = QComboBox()
+            pc.addItem('预设…', None)
+            for name, val in self.RPM_PRESETS:
+                pc.addItem(name, val)
+            pc.setMinimumWidth(104)
+            pc.currentIndexChanged.connect(lambda _x, k=i: self._preset_picked(k))
+            grid.addWidget(pc, i + 1, 3)
+            self.cmb_preset.append(pc)
+            eb = QPushButton('编辑曲线')
+            eb.clicked.connect(lambda _c=False, k=i: self._show_curve(k))
+            grid.addWidget(eb, i + 1, 4)
+            self.btn_edit.append(eb)
+        cv.addLayout(grid)
+
+        crow = QHBoxLayout()
+        crow.setSpacing(10)
+        crow.addWidget(QLabel('套用预设曲线'))
+        self.cmb_curve_preset = QComboBox()
+        self.cmb_curve_preset.addItem('选择一条预设…', None)
+        for name, pts in self.CURVE_PRESETS:
+            self.cmb_curve_preset.addItem(name, pts)
+        self.cmb_curve_preset.setMinimumWidth(240)
+        self.cmb_curve_preset.currentIndexChanged.connect(self._curve_preset_picked)
+        crow.addWidget(self.cmb_curve_preset)
+        crow.addStretch(1)
+        cv.addLayout(crow)
+
+        self.curve = CurveEditor(self.dark)
+        self.curve.changed = self._curve_changed
+        self.curve.setMinimumHeight(180)
+        cv.addWidget(self.curve)
+        self.lbl_editing = QLabel('')
+        self.lbl_editing.setObjectName('CardHint')
+        cv.addWidget(self.lbl_editing)
+        v.addWidget(card)
+        v.addStretch(1)
+        self._load_ui()
+
+    # ---- 配置读写 ----
+    def _profiles(self):
+        return getattr(self.cfg, 'button_profiles', None) or []
+
+    def _profile(self, i):
+        ps = self._profiles()
+        p = ps[i] if i < len(ps) and isinstance(ps[i], dict) else {}
+        return p
+
+    def _load_ui(self):
+        """配置 → 控件全量回填 (仅构造时/读取设备后调用, 不在输入回调里调用)。"""
+        for i in range(4):
+            p = self._profile(i)
+            cmb, sp, pc = self.cmb_mode[i], self.spin_rpm[i], self.cmb_preset[i]
+            cmb.blockSignals(True)
+            sp.blockSignals(True)
+            pc.blockSignals(True)
+            cmb.setCurrentIndex(max(0, cmb.findData(p.get('mode', 'fixed'))))
+            sp.setValue(int(p.get('rpm') or 0))
+            pc.setCurrentIndex(0)
+            cmb.blockSignals(False)
+            sp.blockSignals(False)
+            pc.blockSignals(False)
+        self._show_curve(self._edit_idx)
+        self._sync_enabled()
+
+    def _sync_enabled(self):
+        """整卡随总开关启用/禁用; 每行再按该档模式细化。"""
+        on = self.tgl_follow.isChecked()
+        for w in (self.lbl_level, self.curve, self.lbl_editing, self.btn_read,
+                  self.cmb_curve_preset):
+            w.setEnabled(on)
+        for i in range(4):
+            is_curve = self._profile(i).get('mode') == 'curve'
+            self.cmb_mode[i].setEnabled(on)
+            self.spin_rpm[i].setEnabled(on and not is_curve)
+            self.cmb_preset[i].setEnabled(on and not is_curve)
+            self.btn_edit[i].setEnabled(on and is_curve)
+        if not on:
+            self.lbl_level.setText('当前设备档位：—（未开启跟随）')
+        else:
+            self._update_level()
+
+    def _update_level(self):
+        lvl = getattr(self.ctx['worker'], '_last_dev_level', None)
+        lvl = int(lvl) if isinstance(lvl, int) and 1 <= lvl <= 4 else 1
+        p = self._profile(lvl - 1)
+        desc = (f'固定 {p.get("rpm")} RPM' if p.get('mode') != 'curve'
+                else '智能变频（该档曲线）')
+        self.lbl_level.setText(f'当前设备档位：LV{lvl} → {desc}')
+
+    def _show_curve(self, idx):
+        p = self._profile(idx)
+        self.curve.blockSignals(True)
+        self.curve.set_curve(p.get('curve') or [])
+        self.curve.blockSignals(False)
+        self.lbl_editing.setText(
+            f'正在编辑 LV{idx + 1} 的曲线 —— 拖圆点即改, 停止拖动后自动保存')
+        self._edit_idx = idx
+
+    # ---- 交互 (全部走 debounce, 不即时写盘/写设备) ----
+    def _schedule(self, idx):
+        self._pending = idx
+        self._save_timer.start()          # 重复触发自动重置计时 (只保留最后一次)
+
+    def _commit(self):
+        """debounce 到期: 落盘 + 请求 worker 线程把该档写进设备。"""
+        i = self._pending
+        self._pending = None
+        if i is None:
+            return
+        cfg = self.cfg
+        ps = cfg.button_profiles
+        ps[i]['mode'] = self.cmb_mode[i].currentData()
+        ps[i]['rpm'] = int(self.spin_rpm[i].value())
+        cfg.save()
+        is_curve = ps[i]['mode'] == 'curve'
+        self.spin_rpm[i].setEnabled(not is_curve)
+        self.cmb_preset[i].setEnabled(not is_curve)
+        self.btn_edit[i].setEnabled(is_curve)
+        self.ctx['worker'].request_button_push(i + 1)   # 异步, 不卡界面
+
+    def _row_changed(self, idx):
+        self._schedule(idx)
+
+    def _preset_picked(self, idx):
+        pc = self.cmb_preset[idx]
+        val = pc.currentData()
+        if val is None:
+            return
+        self.spin_rpm[idx].setValue(int(val))
+        pc.blockSignals(True)
+        pc.setCurrentIndex(0)
+        pc.blockSignals(False)
+        self._schedule(idx)
+
+    def _curve_changed(self, pct_list):
+        cfg = self.cfg
+        i = getattr(self, '_edit_idx', 0)
+        cfg.button_profiles[i]['curve'] = [
+            [t, int(p / 100 * MAX_RPM)] for t, p in zip(TEMPS, pct_list)]
+        cfg.save()
+
+    def _curve_preset_picked(self, _x):
+        pts = self.cmb_curve_preset.currentData()
+        if not pts:
+            return
+        i = getattr(self, '_edit_idx', 0)
+        self.cfg.button_profiles[i]['curve'] = [list(p) for p in pts]
+        self.cfg.button_profiles[i]['mode'] = 'curve'
+        self.cfg.save()
+        self._show_curve(i)
+        self.cmb_mode[i].blockSignals(True)
+        self.cmb_mode[i].setCurrentIndex(max(0, self.cmb_mode[i].findData('curve')))
+        self.cmb_mode[i].blockSignals(False)
+        self._sync_enabled()
+        self.cmb_curve_preset.blockSignals(True)
+        self.cmb_curve_preset.setCurrentIndex(0)
+        self.cmb_curve_preset.blockSignals(False)
+        self.lbl_editing.setText(
+            f'已把预设曲线套用到 LV{i + 1}（模式同步改为智能变频，可继续拖圆点微调）')
+
+    def _read_from_device(self):
+        n = self.ctx['worker'].read_device_button_profiles()
+        self._load_ui()
+        self.lbl_editing.setText(
+            f'已从设备读回 {n}/4 档曲线作为初始配置（= 设备出厂行为，可逐档微调）'
+            if n else '读取失败：设备未连接？详见「关于」页日志')
+
+    def _follow_toggled(self, on):
+        cfg = self.cfg
+        cfg.button_follow_enabled = bool(on)
+        if on:
+            cfg.tec_auto_enabled = False       # 与档位自动化互斥 (两者都改档位)
+        cfg.save()
+        self._sync_enabled()
+        # 控制页的 TEC 自动档位开关同步置灰 (避免用户以为它还在生效)
+        try:
+            main = self.ctx.get('main')
+            ctl = getattr(main, 'pages', {}).get('control') if main else None
+            if ctl is not None and hasattr(ctl, 'tgl_tec'):
+                ctl.tgl_tec.blockSignals(True)
+                ctl.tgl_tec.setChecked(bool(cfg.tec_auto_enabled))
+                ctl.tgl_tec.blockSignals(False)
+        except Exception:
+            pass
+        # ⚠️ 开关切换**不写设备**: 默认配置是 4 档都 1200 RPM, 一开就写会覆盖设备出厂的
+        # 四档转速。只有用户主动改某一档时才写那一档 (见 _commit)。
+
+
 class ControlPage(QWidget):
     def __init__(self, ctx, parent=None):
         super().__init__(parent)

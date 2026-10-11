@@ -74,6 +74,12 @@ def draw_icon_pixmap(kind: str, size: int, color: str) -> QPixmap:
                 x, y = dx * 4.5 * u, dy * 4.5 * u
                 w2 = 6 * u if (dx * dy > 0) else 6 * u
                 p.drawRoundedRect(QRectF(x - w2 / 2, y - w2 / 2, w2, w2), 1.2 * u, 1.2 * u)
+    elif k == 'buttons':                   # gamepad: 手柄轮廓 + 十字键 + 两颗按钮
+        p.drawRoundedRect(QRectF(-9 * u, -5.5 * u, 18 * u, 11 * u), 4 * u, 4 * u)
+        p.drawLine(QPointF(-5.5 * u, -1.8 * u), QPointF(-5.5 * u, 2.2 * u))
+        p.drawLine(QPointF(-7.5 * u, 0.2 * u), QPointF(-3.5 * u, 0.2 * u))
+        p.drawEllipse(QPointF(5 * u, -1.2 * u), 1.15 * u, 1.15 * u)
+        p.drawEllipse(QPointF(7.2 * u, 1.6 * u), 1.15 * u, 1.15 * u)
     elif k == 'bluetooth':
         p.drawLine(QPointF(-2 * u, -8 * u), QPointF(4.5 * u, -3.5 * u))
         p.drawLine(QPointF(4.5 * u, -3.5 * u), QPointF(-4 * u, 3 * u))

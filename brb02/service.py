@@ -109,6 +109,7 @@ class DeviceWorker(QThread):
         self._cooling_src = None              # 0x24 参照源缓存 (0x25 byte[0] 原样保留)
         self._audio_pusher = None             # 音频同步电平源 (0.1.8)
         self._keypress_pusher = None          # 按键事件源 (0.1.8)
+        self._button_push_req = 0             # 物理按键档位配置写设备请求 (0=无, 1-4=该档, -1=全档)
         self._scene_applied_key = None        # 场景应用态 (('p',idx)/('none',proc))
         self._scene_saved = None              # 进入场景前快照 (0.1.9)
         self._scene_rpm_applied = False     # 情景转速已下发 (规则清空后需恢复, 审计 G11)
@@ -221,6 +222,14 @@ class DeviceWorker(QThread):
         # (假重连 / 假自动切换探测)。
         # **实测设备上报周期 = 1000ms**(每周期连发 2 帧, 帧间隔 ~1ms), 不是旧文档写的 500ms
         # —— 所以窗口必须 > 1 个周期; 取 1.1s 保证每轮都收到 (旧值 0.45/0.6 都必然漏)。
+        # 物理按键档位配置写设备: 在 worker 线程执行 (GUI 线程直接写会卡 ~1.5s)
+        if self._button_push_req:
+            req, self._button_push_req = self._button_push_req, 0
+            try:
+                self.push_button_profiles(only=(0 if req < 0 else req))
+            except Exception as e:
+                from .logbuf import LOGBUF
+                LOGBUF.write(f'[按键] 档位配置写设备失败: {e}')
         st = self.device.poll_report(1.1)
         if st is None:
             # 单次漏帧不判断: 连续 2 轮都收不到才认定"可能真断"(防假重连/假自动切换探测)
@@ -637,6 +646,46 @@ class DeviceWorker(QThread):
         ]
 
     # ---- 物理按键控制模式 (0.1.10) ----
+    def request_button_push(self, level: int = 0):
+        """GUI 请求把按键档位配置写进设备 —— **只置标志**, 由 worker 线程在下一 tick 执行。
+
+        ⚠️ 不能在 GUI 线程直接写: 每档一次 USB 事务 (wait 0.3s) + 间隔, 4 档约 1.5s,
+        会明显卡界面 (2026-10-11 实测反馈)。level=1-4 只写该档, 其他值/0 = 全 4 档。
+        """
+        lvl = int(level or 0)
+        self._button_push_req = lvl if 1 <= lvl <= 4 else -1      # -1 = 全 4 档
+
+    def push_button_profiles(self, only: int = 0) -> int:
+        """把档位的**固定转速**配置写进设备档位槽 (0x24 带 level)。`only`=0 写全 4 档。
+
+        写进去之后 **不开工具箱时设备自己也能按每档的固定转速工作**。返回成功写入的档位数。
+
+        ⚠️ `mode='curve'` (智能变频) 的档位**跳过不写**: 它的目标转速由**主机**按该档曲线
+        实时算 (设备读不到 CPU/GPU 温度), 设备侧那一档保持自己的出厂行为即可 ——
+        同时也彻底避开了"往设备 flash 写曲线"的风险 (非法锚点会导致开机循环)。
+        """
+        from .logbuf import LOGBUF
+        if not self.device.connected:
+            return 0
+        src = getattr(self, '_cooling_src', None)
+        levels = [int(only)] if 1 <= int(only or 0) <= 4 else [1, 2, 3, 4]
+        ok = skipped = 0
+        for lvl in levels:
+            prof = self._button_profile(lvl)
+            if prof.get('mode') == 'curve':
+                skipped += 1
+                continue
+            try:
+                self.device.set_fixed_rpm(int(prof.get('rpm') or 0), level=lvl, src=src)
+                ok += 1
+            except Exception as e:
+                LOGBUF.write(f'[按键] L{lvl} 固定转速写入设备失败 (已跳过): {e}')
+            time.sleep(0.08)
+        LOGBUF.write(f'[按键] 固定转速已写入设备档位槽: {ok}/{len(levels)} 档'
+                     + (f'（{skipped} 档为智能变频, 由主机实时驱动, 未写设备）' if skipped else '')
+                     + ('；不开工具箱设备也能保持' if ok else ''))
+        return ok
+
     def read_device_button_profiles(self) -> int:
         """从设备读回 4 档**曲线槽** (0x26 form=1) 作为按键模式的初始配置。
 
@@ -672,36 +721,6 @@ class DeviceWorker(QThread):
             self.config.save()
         LOGBUF.write(f'[按键] 已从设备读回 {ok}/4 档曲线作为初始配置'
                      + ('（= 设备出厂行为, 可在此基础上微调）' if ok == 4 else '（部分失败）'))
-        return ok
-
-    def push_button_profiles(self) -> int:
-        """把 4 个档位的**固定转速**配置写进设备档位槽 (0x24 带 level)。
-
-        写进去之后 **不开工具箱时设备自己也能按每档的固定转速工作**。返回成功写入的档位数。
-
-        ⚠️ `mode='curve'` (智能变频) 的档位**跳过不写**: 它的目标转速由**主机**按该档曲线
-        实时算 (设备读不到 CPU/GPU 温度), 设备侧那一档保持自己的出厂行为即可 ——
-        同时也彻底避开了"往设备 flash 写曲线"的风险 (非法锚点会导致开机循环)。
-        """
-        from .logbuf import LOGBUF
-        if not self.device.connected:
-            return 0
-        src = getattr(self, '_cooling_src', None)
-        ok = skipped = 0
-        for lvl in range(1, 5):
-            prof = self._button_profile(lvl)
-            if prof.get('mode') == 'curve':
-                skipped += 1
-                continue
-            try:
-                self.device.set_fixed_rpm(int(prof.get('rpm') or 0), level=lvl, src=src)
-                ok += 1
-            except Exception as e:
-                LOGBUF.write(f'[按键] L{lvl} 固定转速写入设备失败 (已跳过): {e}')
-            time.sleep(0.08)
-        LOGBUF.write(f'[按键] 固定转速已写入设备档位槽: {ok}/4 档'
-                     + (f'（{skipped} 档为智能变频, 由主机实时驱动, 未写设备）' if skipped else '')
-                     + ('；不开工具箱设备也能保持' if ok else ''))
         return ok
 
     def push_device_switches(self):

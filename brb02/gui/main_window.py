@@ -14,14 +14,15 @@ from brb02.logbuf import LOGBUF
 
 from .theme import build_palette, build_qss, temp_color
 from .widgets import Badge, FanIcon, Toggle, nav_icon, style_combo_popup
-from .pages import (AboutPage, ControlPage, CurvePage, DevicePage, ScreenPage,
-                    StatusPage, MAX_RPM)
+from .pages import (AboutPage, ButtonPage, ControlPage, CurvePage, DevicePage,
+                    ScreenPage, StatusPage, MAX_RPM)
 
 APP_NAME = 'Alp 工具箱'
 DOCK_COLLAPSED = 76
 DOCK_EXPANDED = 200
 
 NAV = [('状态', 'status', 'status'), ('曲线', 'curve', 'curve'),
+       ('按键', 'buttons', 'buttons'),
        ('屏幕', 'screen', 'screen'),
        ('设置', 'control', 'control'), ('设备', 'devices', 'devices')]
 ABOUT_KEY = 'about'
@@ -134,8 +135,10 @@ class Sidebar(QWidget):
     """悬浮圆角面板: 图标导航, 激活项药丸高亮。"""
 
     ICON_KIND = {'status': 'status', 'curve': 'curve', 'control': 'control',
+                 'buttons': 'buttons',
                  'screen': 'screen', 'devices': 'devices', ABOUT_KEY: 'about'}
     LABEL = {'status': '状态', 'curve': '曲线', 'control': '设置',
+             'buttons': '按键',
              'screen': '屏幕', 'devices': '设备', ABOUT_KEY: '关于'}
 
     def __init__(self, win: 'MainWindow'):
@@ -260,6 +263,7 @@ class MainWindow(QMainWindow):
             'screen': ScreenPage(self.ctx),
             'control': ControlPage(self.ctx),
             'devices': DevicePage(self.ctx),
+            'buttons': ButtonPage(self.ctx),
             ABOUT_KEY: AboutPage(self.ctx),
         }
         self.wrappers = {}
