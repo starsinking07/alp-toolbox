@@ -466,6 +466,41 @@ if _MW2 is not None:
     check('手动挡位提示随原因变化 (不再固定写"智能变频运行中")',
           'why or' in _ins.getsource(_CP2._sync_manual_enabled))
 
+    # --- 互斥必须**双向**同步: 配置 → 控件 (2026-10-11 用户反馈"状态栏开了工具箱没同步") ---
+    print('=== 互斥双向同步 (配置→控件) ===')
+    _sp3 = _SP2(dict(ctx))
+    _cp3 = ControlPage(dict(ctx))
+    _bp3 = ButtonPage(dict(ctx))
+    _all3 = (_sp3, _cp3, _bp3)
+
+    def _apply():
+        for _pg in _all3:
+            _pg.sync_mode_state()
+
+    cfg.curve_enabled = False
+    cfg.tec_auto_enabled = False
+    cfg.button_follow_enabled = True
+    _apply()
+    check('配置 follow=开 → 按键页开关回填为开', _bp3.tgl_follow.isChecked() is True)
+    check('配置 follow=开 → 控制页两开关回填为关',
+          _cp3.tgl_curve.isChecked() is False and _cp3.tgl_tec.isChecked() is False)
+    check('配置 follow=开 → 状态页智能变频开关回填为关', _sp3.tgl_smart.isChecked() is False)
+
+    cfg.button_follow_enabled = False
+    cfg.tec_auto_enabled = True
+    _apply()
+    check('配置 tec=开 → 控制页档位自动开关回填为开', _cp3.tgl_tec.isChecked() is True)
+    check('配置 tec=开 → 按键页开关回填为关', _bp3.tgl_follow.isChecked() is False)
+
+    cfg.tec_auto_enabled = False
+    cfg.curve_enabled = True
+    _apply()
+    check('配置 curve=开 → 状态页/控制页智能变频开关回填为开',
+          _sp3.tgl_smart.isChecked() is True and _cp3.tgl_curve.isChecked() is True)
+    check('配置 curve=开 → 按键页开关回填为关', _bp3.tgl_follow.isChecked() is False)
+    cfg.curve_enabled = False
+    _apply()
+
 # ===== USB 读超时判定 (2026-10-08 修复: 旧判据对 USBTimeoutError 全失效) =====
 print('=== USB 读超时判定 ===')
 from brb02.device import _is_read_timeout

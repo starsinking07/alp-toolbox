@@ -318,8 +318,14 @@ class StatusPage(QWidget):
         self.gauge_fan.set_color(prim)
 
     def sync_mode_state(self):
-        """控制方式互斥: 被别的模式顶掉时置灰本页的智能变频开关 (2026-10-11 用户要求)。"""
+        """控制方式互斥: 按配置**回填智能变频开关** + 被顶掉时置灰说明 (2026-10-11)。
+
+        ⚠️ 必须回填开关本身 (旧版只置灰) —— 否则从托盘改配置后页面开关不动。
+        """
         cfg = self.ctx['cfg']
+        self.tgl_smart.blockSignals(True)
+        self.tgl_smart.setChecked(bool(cfg.curve_enabled))
+        self.tgl_smart.blockSignals(False)
         blocked, why = False, ''
         if getattr(cfg, 'button_follow_enabled', False):
             blocked, why = True, '已开启「物理按键控制」—— 智能变频开关已停用'
@@ -987,9 +993,12 @@ class CurvePage(QWidget):
         return False, ''
 
     def sync_mode_state(self):
-        """控制方式互斥: 被别的模式顶掉时本页模式控件置灰 + 说明原因 (2026-10-11 用户要求)。"""
+        """控制方式互斥: 按配置**回填智能变频开关** + 被顶掉时置灰 + 说明原因 (2026-10-11)。"""
         blocked, why = self._mode_blocked_by()
         try:
+            self.tgl_smart2.blockSignals(True)
+            self.tgl_smart2.setChecked(bool(self.ctx['cfg'].curve_enabled))
+            self.tgl_smart2.blockSignals(False)
             self.tgl_smart2.setEnabled(not blocked)
             self.card_editor.setEnabled(not blocked)
         except AttributeError:
@@ -1260,7 +1269,15 @@ class ButtonPage(QWidget):
             self._update_level()
 
     def sync_mode_state(self):
-        """控制方式互斥: 本页是模式持有者, 只需按总开关刷新自身启用态。"""
+        """控制方式互斥: 本页是模式持有者, 按配置**回填总开关** + 刷新启用态。
+
+        ⚠️ 2026-10-11: 旧版只调 `_sync_enabled()` (只管置灰), **没回填开关本身** ⇒
+        从托盘改了配置后, 页面开关仍停在原位 (用户反馈"状态栏开启了物理按钮切换,
+        工具箱没同步")。互斥同步必须**双向**: 配置 → 控件。
+        """
+        self.tgl_follow.blockSignals(True)
+        self.tgl_follow.setChecked(bool(getattr(self.cfg, 'button_follow_enabled', False)))
+        self.tgl_follow.blockSignals(False)
         self._sync_enabled()
 
     def _on_gear_changed(self, lvl, rpm):
@@ -1912,8 +1929,18 @@ class ControlPage(QWidget):
         self._sync_setting_deps()
 
     def sync_mode_state(self):
-        """控制方式互斥 (2026-10-11 用户要求): 物理按键控制开启时, 本页两个自动开关置灰 + 说明。"""
-        follow = bool(getattr(self.ctx['cfg'], 'button_follow_enabled', False))
+        """控制方式互斥 (2026-10-11 用户要求): 按配置**回填两个开关** + 被顶掉时置灰说明。
+
+        ⚠️ 旧版只做置灰, 没回填开关 ⇒ 从托盘改配置后页面开关不动 (用户反馈"档位自动切换
+        也是一个问题")。互斥同步必须双向: 配置 → 控件。
+        """
+        cfg = self.ctx['cfg']
+        for tgl, val in ((self.tgl_curve, cfg.curve_enabled),
+                         (self.tgl_tec, cfg.tec_auto_enabled)):
+            tgl.blockSignals(True)
+            tgl.setChecked(bool(val))
+            tgl.blockSignals(False)
+        follow = bool(getattr(cfg, 'button_follow_enabled', False))
         why = ('已开启「物理按键控制」—— 档位由设备物理按键决定，此处自动档位已停用'
                if follow else '')
         _dim_widget(self.row_curve, follow, why)
