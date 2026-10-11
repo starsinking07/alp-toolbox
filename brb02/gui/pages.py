@@ -2480,6 +2480,17 @@ class ScreenPage(QWidget):
         fit_row.addStretch(1)
         cv.addLayout(fit_row)
 
+        # 上传稳定模式 (2026-10-11 兑现): 走 0xC6 流控 —— 每包等设备主动回的流控帧再发下一包,
+        # 节奏完全顺应设备, 永不 0x0C, 代价约 34s/张 (节拍式 ~17s)。此前 config.upload_stable
+        # 全库无人读、flow_control 无人传 ⇒ 发布说明宣传的这个功能实际不可达。
+        self.chk_stable = QCheckBox('上传稳定模式（慢一倍但更稳；关闭时若失败会自动回落）')
+        self.chk_stable.setChecked(bool(getattr(self.cfg, 'upload_stable', False)))
+        self.chk_stable.setToolTip(
+            '开启: 每包等设备流控帧再发 (约 34 秒/张, 永不失败)。\n'
+            '关闭: 节拍式快传 (约 17 秒/张); 若失败会自动重传一次并切到流控模式。')
+        self.chk_stable.toggled.connect(self._stable_changed)
+        cv.addWidget(self.chk_stable)
+
         # 缩放/平移 (0.1.8, cover 模式生效; PIut02 同款交互)
         zoom_card, _, zv = _card('缩放与位置', '“cover 裁边”模式下可放大 100~400% 并平移画面, 实时预览与上传同源。')
         zrow = QHBoxLayout()
@@ -2740,6 +2751,16 @@ class ScreenPage(QWidget):
                 '' if en else
                 '⚠️ 当前是「拉伸铺满」—— 缩放与平移只在「等比裁边」模式下生效。'
                 '要放大/移动画面, 请在上方"缩放方式"里切到等比裁边。')
+
+    def _stable_changed(self, on):
+        """上传稳定模式开关 (持久化到 cfg.upload_stable, 下次上传生效)。"""
+        self.cfg.upload_stable = bool(on)
+        try:
+            self.cfg.save()
+        except Exception:
+            pass
+        self.result.setText('已开启上传稳定模式 —— 下次上传生效（约 34 秒/张，更稳）'
+                            if on else '已关闭上传稳定模式 —— 恢复快传（失败仍会自动回落流控）')
 
     def _on_fit_changed(self, _idx):
         try:

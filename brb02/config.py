@@ -64,7 +64,9 @@ class Config:
     gear_light: bool = False            # 挡位灯联动 (依赖 RGB 写入逆向)
     # 情景
     scene_enabled: bool = False
-    scene_rules: list = field(default_factory=list)   # (旧版遗留, 已由 scene_profiles 取代)
+    # (2026-10-11 清理: 旧字段 `scene_rules` 已删除 —— 它是 0.1.8 前的情景实现, 被
+    #  `scene_profiles` 取代后**全库无人读取**, 只留定义和一段归一化代码。旧配置里若
+    #  还有该键, load() 会直接忽略 (只 setattr 已知字段), 无兼容问题。)
     # 场景配置 (0.1.9, 官方"情景"同款+增强): 4 槽 × [固定转速/曲线方案/灯效模式 + 进程子串]
     # 每项: {'name': str, 'enabled': bool, 'rpm': int(0=不改), 'scheme': str(''=不改),
     #        'light_mode': int(-1=不改, RGB_MODE_*), 'processes': [前台进程子串,...]}
@@ -199,8 +201,6 @@ class Config:
             self.learning_bias = 'balanced'
         if not isinstance(self.learning_offsets, list):
             self.learning_offsets = []
-        if not isinstance(self.scene_rules, list):
-            self.scene_rules = []
         if not isinstance(self.scene_profiles, list):
             self.scene_profiles = []
         while len(self.scene_profiles) < 4:          # 固定 4 槽 (官方同款 配置A-D)

@@ -127,8 +127,13 @@ class Brb02Device:
         return out
 
     # ---- 状态 ----
-    def poll_report(self, seconds: float = 0.6) -> Optional[dict]:
-        """收自动上报 (设备每 500ms 推送), 返回 {rpm, flag}"""
+    def poll_report(self, seconds: float = 1.1) -> Optional[dict]:
+        """收自动上报 (设备每 **1000ms** 推送一个周期, 每周期连发 2 帧、帧间隔 ~1ms),
+        返回 {rpm, flag}。
+
+        ⚠️ 2026-10-11: 窗口默认值从 0.6 提到 1.1 —— 实测上报周期是 **1000ms**(旧文档
+        写的 500ms 是错的), 窗口短于一个周期就必然周期性漏帧, 调用方会把 None 误判成断线。
+        """
         t0 = time.time()
         last = None
         while time.time() - t0 < seconds:
@@ -136,7 +141,7 @@ class Brb02Device:
                 with self._lock:
                     rx = self._t.read(300)
             except Exception as e:
-                # 读超时属常态 (设备 500ms 才推一帧): 吃满窗口继续等, 其他异常才中断 (审计 G16)
+                # 读超时属常态 (设备 1000ms 才推一个周期): 吃满窗口继续等, 其他异常才中断 (审计 G16)
                 # ⚠️ 判据用 _is_read_timeout: 旧写法对 pyusb 的 USBTimeoutError 全部失效 (2026-10-08 修)
                 if _is_read_timeout(e):
                     continue

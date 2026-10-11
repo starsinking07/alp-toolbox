@@ -216,10 +216,20 @@ class DeviceWorker(QThread):
             if req is not None:
                 self._run_screen_upload(req)
                 return
-        st = self.device.poll_report(0.45)
+        # ⚠️ 2026-10-11 修复: 旧值 0.45 远短于设备**实际**上报周期 ⇒ 每轮 poll 约有
+        # 1/3 概率整段漏掉上报, 返回 None 后被当成"瞬断"去走重连 + 自动切换探测
+        # (假重连 / 假自动切换探测)。
+        # **实测设备上报周期 = 1000ms**(每周期连发 2 帧, 帧间隔 ~1ms), 不是旧文档写的 500ms
+        # —— 所以窗口必须 > 1 个周期; 取 1.1s 保证每轮都收到 (旧值 0.45/0.6 都必然漏)。
+        st = self.device.poll_report(1.1)
         if st is None:
+            # 单次漏帧不判断: 连续 2 轮都收不到才认定"可能真断"(防假重连/假自动切换探测)
+            self._miss_streak = getattr(self, '_miss_streak', 0) + 1
+            if self._miss_streak < 2:
+                return
             # 瞬断重连
             if self.device.connect():
+                self._miss_streak = 0
                 self._last_sent_rpm = None   # 重连后强制重发当前目标 (防假成功残留, v3.61)
                 return
             # 确认断线: 双向自动切换探测
@@ -252,6 +262,7 @@ class DeviceWorker(QThread):
                 else '设备连接丢失, 重连中...')
             return
         else:
+            self._miss_streak = 0
             self._last_status = st
             self.statusChanged.emit(st)
 
@@ -816,29 +827,19 @@ class DeviceWorker(QThread):
         LOGBUF.write(f'[屏幕] 开始上传图片: {path} (翻转 H={flip_h} V={flip_v} fit={fit})')
         self._uploading = True
 
-        def _once():
-            try:
-                return self.device.upload_image(
-                    path, heartbeats=self._live_heartbeats(),
-                    progress_cb=lambda s, t: self.uploadProgress.emit(s, t),
-                    cancel_event=self._upload_cancel, flip_h=flip_h, flip_v=flip_v, fit=fit)
-            except Exception as e:
-                import traceback
-                tb = traceback.format_exc()
-                traceback.print_exc()
-                LOGBUF.write(f'[屏幕] 上传异常: {e}\n{tb}')
-                return {'ok': False, 'reason': f'异常: {e}', 'c6_total': 0, 'c6_bad': 0,
-                        'first_bad': None, 'status_hist': {}, 'c4_ack_ms': 0.0,
-                        'elapsed_ms': 0.0, 'canceled': False, 'sent': 0}
-
         base_ms = 4.0 if path.lower().endswith('.bin') else None   # 历史画布 = 预验证, 走 4ms 快传
-        def _once():
+
+        def _once(flow=None):
+            """上传一次。flow=None → 用配置的「稳定模式」(upload_stable);
+            True → 强制 0xC6 流控 (首次失败后的回落重传用)。"""
+            use_flow = (bool(getattr(self.config, 'upload_stable', False))
+                        if flow is None else bool(flow))
             try:
                 return self.device.upload_image(
                     path, heartbeats=self._live_heartbeats(),
                     progress_cb=lambda s, t: self.uploadProgress.emit(s, t),
                     cancel_event=self._upload_cancel, flip_h=flip_h, flip_v=flip_v, fit=fit,
-                    base_ms=base_ms)
+                    base_ms=base_ms, flow_control=use_flow)
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
@@ -851,9 +852,13 @@ class DeviceWorker(QThread):
             res = _once()
             # 整流重传兜底 (2026-10-06 诊断包案): 页边界 0x0C 级联失败后重传即愈
             # (8 次上传 4 败, 手动重传全部成功)。只重传 1 次防循环; 取消/握手失败不重传。
+            # ⚠️ 2026-10-11: 重传时**切到 0xC6 流控模式** (每包等设备流控帧, ~34s 但永不
+            # 0x0C) —— 这正是 v0.1.8 发布说明承诺的"失败重传自动回落流控", 此前
+            # flow_control 参数根本没人传 ⇒ 该路径不可达, 承诺未兑现。
             if not res.get('ok') and not res.get('canceled') and res.get('c6_bad', 0) > 0:
-                LOGBUF.write(f'[屏幕] 首次上传失败 ({res.get("c6_bad", 0)} 非00) —— 自动重传一次')
-                res = _once()
+                LOGBUF.write(f'[屏幕] 首次上传失败 ({res.get("c6_bad", 0)} 非00) —— '
+                             f'自动重传一次 (切 0xC6 流控模式: 较慢但更稳)')
+                res = _once(flow=True)
         finally:
             self._uploading = False
             self._upload_cancel.clear()
@@ -1052,7 +1057,11 @@ class DeviceWorker(QThread):
         LOGBUF.write(f'[屏幕] 自动上屏: {key}')
         self._uploading = True
 
-        def _once():
+        def _once(flow=None):
+            """上屏一次。flow=None → 用配置的「稳定模式」(upload_stable);
+            True → 强制 0xC6 流控 (首次失败后的回落重传用)。"""
+            use_flow = (bool(getattr(self.config, 'upload_stable', False))
+                        if flow is None else bool(flow))
             try:
                 if kind == 'info':
                     img = sc.render_card(
@@ -1078,7 +1087,7 @@ class DeviceWorker(QThread):
                 return self.device.upload_canvas(
                     data, heartbeats=self._live_heartbeats(),
                     progress_cb=lambda s, t: self.uploadProgress.emit(s, t),
-                    cancel_event=self._screen_cancel, base_ms=7.0)
+                    cancel_event=self._screen_cancel, base_ms=7.0, flow_control=use_flow)
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
@@ -1089,9 +1098,12 @@ class DeviceWorker(QThread):
         try:
             res = _once()
             # 整流重传兜底 (同 _run_image_upload, 2026-10-06 案): 级联非00 重传即愈
+            # ⚠️ 2026-10-11: 重传切 0xC6 流控模式 (较慢但永不 0x0C) —— 兑现 v0.1.8 承诺的
+            # "失败重传自动回落流控" (此前 flow_control 无人传, 该路径不可达)。
             if not res.get('ok') and not res.get('canceled') and res.get('c6_bad', 0) > 0:
-                LOGBUF.write(f'[屏幕] 首次上屏失败 ({res.get("c6_bad", 0)} 非00) —— 自动重传一次')
-                res = _once()
+                LOGBUF.write(f'[屏幕] 首次上屏失败 ({res.get("c6_bad", 0)} 非00) —— '
+                             f'自动重传一次 (切 0xC6 流控模式)')
+                res = _once(flow=True)
         finally:
             self._uploading = False
             self._screen_cancel.clear()   # 取消意图已消化, 不残留给下次自动上屏 (否则恢复卡永久秒取消)

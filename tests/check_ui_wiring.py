@@ -280,6 +280,35 @@ try:
 except Exception as _e:
     print(f'  [SKIP] main_window 不可导入 ({_e})')
 
+# ===== 设备上报窗口 (2026-10-11: 实测周期 1000ms, 旧值 0.45 实测漏帧 40%) =====
+print('=== 设备上报窗口 vs 上报周期 ===')
+import inspect as _ins
+from brb02 import device as _dev, service as _svc
+_dflt = _dev.Brb02Device.poll_report.__defaults__[0]
+check(f'poll_report 默认窗口 {_dflt}s > 上报周期 1.0s', _dflt > 1.0)
+_tsrc = _ins.getsource(_svc.DeviceWorker._tick)
+check('service._tick 传入窗口 > 1.0s (旧值 0.45 → 40% 漏帧 → 假瞬断)', 'poll_report(1.1)' in _tsrc)
+check('单次漏帧不判瞬断 (连续 2 次才判)', '_miss_streak' in _tsrc)
+check('poll_report docstring 已纠正周期 (不再写 500ms)',
+      '1000ms' in (_dev.Brb02Device.poll_report.__doc__ or ''))
+
+# ===== 上传稳定模式 (2026-10-11: 修"配置项无人读 / flow_control 无人传"的死功能) =====
+print('=== 上传稳定模式 (0xC6 流控) ===')
+check('屏幕页有「上传稳定模式」开关', hasattr(sp, 'chk_stable'))
+check('开关初值与配置一致', sp.chk_stable.isChecked() == bool(getattr(cfg, 'upload_stable', False)))
+sp.chk_stable.setChecked(True)
+sp._stable_changed(True)
+check('开启 → 写入 cfg.upload_stable', bool(getattr(cfg, 'upload_stable', False)) is True)
+sp.chk_stable.setChecked(False)
+sp._stable_changed(False)
+check('关闭 → 写回 cfg.upload_stable', bool(getattr(cfg, 'upload_stable', False)) is False)
+_svc_src = _ins.getsource(_svc.DeviceWorker)
+check('upload_stable 不再是死字段 (生产代码真的读它)', 'upload_stable' in _svc_src)
+check('两条上传路径都把 flow_control 传下去了 (旧版无人传 ⇒ 路径不可达)',
+      _svc_src.count('flow_control=use_flow') >= 2)
+check('失败重传切流控 (兑现发布说明承诺的"自动回落")',
+      _svc_src.count('_once(flow=True)') >= 2)
+
 # ===== USB 读超时判定 (2026-10-08 修复: 旧判据对 USBTimeoutError 全失效) =====
 print('=== USB 读超时判定 ===')
 from brb02.device import _is_read_timeout
