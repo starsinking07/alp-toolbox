@@ -43,6 +43,7 @@ class _W(QObject):
     deviceSwitchesChanged = Signal(dict); screenReadFinished = Signal(dict)
     def __init__(self):
         super().__init__(); self.device = _D(); self.temps = _T()
+        self._last_dev_level = 1        # 物理按键控制: 设备当前档位 (stub)
     def set_device_switches(self, s, p): pass
     def set_lighting(self, *a, **k): pass
     def start_image_upload(self, *a, **k): pass
@@ -51,6 +52,7 @@ class _W(QObject):
     def read_param_page_layout(self): return None
     def set_lcd_switch(self, on): self._lcd = bool(on); return bool(on)
     def get_lcd_switch_status(self): return True
+    def push_button_profiles(self): return 4          # 物理按键控制: 写设备档位槽 (stub)
 
 cfg = Config.load(); cfg.dark = False
 ctx = {'cfg': cfg, 'worker': _W(), 'dark': False,
@@ -308,6 +310,36 @@ check('两条上传路径都把 flow_control 传下去了 (旧版无人传 ⇒ �
       _svc_src.count('flow_control=use_flow') >= 2)
 check('失败重传切流控 (兑现发布说明承诺的"自动回落")',
       _svc_src.count('_once(flow=True)') >= 2)
+
+# ===== CurvePage: 物理按键控制模式 (2026-10-11) =====
+print('=== CurvePage 物理按键控制 ===')
+from brb02.gui.pages import CurvePage
+cvp = CurvePage(dict(ctx))
+check('有「跟随物理按键」总开关', hasattr(cvp, 'tgl_btn_follow'))
+check('有 4 档位行 (模式 / 转速 / 编辑曲线)',
+      len(cvp.btn_mode) == 4 and len(cvp.btn_rpm) == 4 and len(cvp.btn_edit) == 4)
+check('有该档曲线编辑器 + 档位标签',
+      hasattr(cvp, 'btn_curve') and hasattr(cvp, 'lbl_btn_level'))
+cvp.tgl_btn_follow.setChecked(False)
+cvp._btn_sync_enabled()
+check('未开启跟随时整卡禁用 (防误改)',
+      not cvp.btn_mode[0].isEnabled() and not cvp.btn_curve.isEnabled())
+cvp.tgl_btn_follow.setChecked(True)
+cvp._btn_sync_enabled()
+check('开启后整卡可用', cvp.btn_mode[0].isEnabled() and cvp.btn_curve.isEnabled())
+cvp.btn_mode[1].setCurrentIndex(max(0, cvp.btn_mode[1].findData('curve')))
+cvp.btn_rpm[1].setValue(2500)
+cvp._btn_profile_changed(1)
+check('改模式写进 cfg.button_profiles', cfg.button_profiles[1]['mode'] == 'curve')
+check('改转速写进 cfg.button_profiles', cfg.button_profiles[1]['rpm'] == 2500)
+check('曲线档禁用转速框、启用曲线编辑',
+      not cvp.btn_rpm[1].isEnabled() and cvp.btn_edit[1].isEnabled())
+check('固定转速档反之 (LV1 默认 fixed)',
+      cvp.btn_rpm[0].isEnabled() and not cvp.btn_edit[0].isEnabled())
+check('引擎: 档位取设备值而非按转速反推', '_dev_level()' in _svc_src)
+check('引擎: TEC 自动档位在按键模式下跳过', 'cfg.button_follow_enabled' in _svc_src)
+check('引擎: 目标按档位配置取 (固定/该档曲线)', '_button_profile' in _svc_src)
+check('有写设备档位槽的方法', hasattr(_svc.DeviceWorker, 'push_button_profiles'))
 
 # ===== USB 读超时判定 (2026-10-08 修复: 旧判据对 USBTimeoutError 全失效) =====
 print('=== USB 读超时判定 ===')

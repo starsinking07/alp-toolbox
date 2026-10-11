@@ -45,6 +45,15 @@ class Config:
     tec_auto_enabled: bool = False      # 风扇档位随温度自动升/降档
     tec_thresholds: list = field(default_factory=lambda: [55, 65, 75])   # L2/L3/L4 进入温度°C
     tec_hysteresis: float = 2.0         # 降档回落滞回 °C
+    # ---- 物理按键控制模式 (0.1.10) ----
+    # 档位由**设备物理按键**决定, 工具箱「跟随」而非覆盖。每档 (LV1-4) 独立配置:
+    #   mode='fixed' → 用该档的 rpm;  mode='curve' → 用该档**自己**的 curve (4 档曲线互不影响)。
+    # 开启后: ①档位自动化 (TEC 自动档位) 停用 (档位归设备) ②配置写进**设备档位槽**,
+    # 于是不开工具箱时设备自己也能按每档配置工作 (智能变频除外 —— 它要靠主机读 CPU/GPU 温度)。
+    button_follow_enabled: bool = False
+    button_profiles: list = field(default_factory=lambda: [
+        {'mode': 'fixed', 'rpm': 1200, 'curve': [list(x) for x in DEFAULT_CURVE]}
+        for _ in range(4)])
     # 智能启停
     start_stop_enabled: bool = False
     start_stop_off_below: float = 45.0  # 低于此温度关风扇
@@ -182,6 +191,25 @@ class Config:
                                for k, v in self.curve_profiles.items()}
         if not isinstance(self.curve_active, str) or not self.curve_active:
             self.curve_active = '默认'
+
+        # 物理按键控制模式: 固定 4 档 (LV1-4); 曲线走 _san_curve ⇒ 转速非递减 (曲线红线,
+        # 非法锚点会写坏设备 flash 导致开机循环, 这里必须拦)
+        if not isinstance(self.button_profiles, list):
+            self.button_profiles = []
+        while len(self.button_profiles) < 4:
+            self.button_profiles.append({})
+        _bp = []
+        for _p in self.button_profiles[:4]:
+            _p = _p if isinstance(_p, dict) else {}
+            _m = _p.get('mode')
+            _bp.append({
+                'mode': _m if _m in ('fixed', 'curve') else 'fixed',
+                'rpm': _clamp(_p.get('rpm'), 0, 4800, 1200),
+                'curve': _san_curve(_p.get('curve')),
+            })
+        self.button_profiles = _bp
+        if not isinstance(self.button_follow_enabled, bool):
+            self.button_follow_enabled = bool(self.button_follow_enabled)
 
         raw_thr = self.tec_thresholds if isinstance(self.tec_thresholds, list) else []
         vals = [_clamp(v, 30, 100, d) for v, d in zip(raw_thr, (55, 65, 75))]

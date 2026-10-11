@@ -285,9 +285,10 @@ class Brb02Device:
         level = max(1, min(4, int(level)))
         self._send(protocol.set_cooling_fixed(rpm, level=level, src=src), wait_s=0.3)
 
-    def set_curve(self, anchors):
+    def set_curve(self, anchors, level: int | None = None, src: int | None = None):
         """写入智能变频曲线 (4 锚点)。⚠️ 只允许写入来自 get_curve 的合法值。
-        峰值转速 >2800 时自动使用档位 4 (高档曲线才支持 4000)。
+        level=None 时按峰值自动选档 (>2800 → 档位 4); 可显式指定 1-4
+        (物理按键控制模式要按档写各自的曲线槽, 2026-10-11 加)。
         校验 (审计 G23, flash 红线防线): 温度 0-110 且严格递增, 转速 0-4800 非递减;
         违例直接 raise ValueError, 不向设备下发任何帧。"""
         pts = [(int(t), int(r)) for t, r in anchors]
@@ -305,8 +306,10 @@ class Brb02Device:
                 if r < prev_r:
                     raise ValueError(f'曲线转速必须非递减: {prev_r} → {r} RPM')
             prev_t, prev_r = t, r
-        level = 4 if max(r for _t, r in pts) > 2800 else 1
-        self._send(protocol.set_cooling_curve(pts, level=level), wait_s=0.3)
+        if level is None:
+            level = 4 if max(r for _t, r in pts) > 2800 else 1
+        level = max(1, min(4, int(level)))
+        self._send(protocol.set_cooling_curve(pts, level=level, src=src), wait_s=0.3)
 
     # ---- 屏幕上传 (整程 ~10.5~16.3s, 必须在工作线程调用, 不阻塞调用方) ----
     @staticmethod

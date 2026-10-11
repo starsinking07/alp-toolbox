@@ -379,6 +379,23 @@ class DeviceWorker(QThread):
                 self._apply_target(0, now, 'startstop')
                 return
 
+        # --- 物理按键控制模式 (0.1.10): 档位归设备物理按键, 工具箱「跟随」---
+        # 目标转速按**当前档位**的配置取: mode='fixed' 用该档 rpm; mode='curve' 用该档**自己**的曲线。
+        # 优先级放在温度墙/智能启停之后 (那两者是过热保护与省电, 应压过档位选择)。
+        if cfg.button_follow_enabled:
+            lvl = self._dev_level()
+            prof = self._button_profile(lvl)
+            if prof.get('mode') == 'curve':
+                target = self._curve_target(temp, curve=prof.get('curve'))
+                if cfg.learning_enabled:
+                    self._learning_tick(temp, now)
+                if cfg.prediction_enabled:
+                    target = self._prediction_boost(target, now)
+                self._apply_target(target, now, 'button-curve')
+            else:
+                self._apply_target(int(prof.get('rpm') or 0), now, 'button-fixed')
+            return
+
         # --- 手动模式: GUI 手动设定后的保持期内不动 ---
         if not cfg.curve_enabled:
             if getattr(self, '_curve_was_on', False):
@@ -419,9 +436,10 @@ class DeviceWorker(QThread):
         cands = [t for t in (cpu, gpu) if t and t > 1]
         return max(cands) if cands else None
 
-    def _curve_target(self, temp: float) -> int:
-        """按 19 锚点曲线插值出目标 RPM, 含学习偏移。"""
-        pts = sorted((float(t), float(r)) for t, r in self.config.curve) or [(40, 1000)]
+    def _curve_target(self, temp: float, curve=None) -> int:
+        """按曲线锚点插值出目标 RPM, 含学习偏移。
+        curve=None 用全局曲线; 物理按键控制模式传**该档自己的曲线**。"""
+        pts = sorted((float(t), float(r)) for t, r in (curve or self.config.curve)) or [(40, 1000)]
         # 学习偏移 (按温度换算到锚点区间)
         offsets = self.config.learning_offsets or []
         lo, hi = pts[0][0], pts[-1][0]
@@ -441,9 +459,26 @@ class DeviceWorker(QThread):
             target = target * (1 + off / 100.0)
         return int(max(0, min(MAX_RPM, target)))
 
+    def _dev_level(self) -> int:
+        """设备当前档位 (物理按键决定; 每 4s 轮询 0x25 更新)。未知/越界时保守取 1。"""
+        lvl = getattr(self, '_last_dev_level', None)
+        return lvl if isinstance(lvl, int) and 1 <= lvl <= 4 else 1
+
+    def _button_profile(self, level: int) -> dict:
+        """取某档 (1-4) 在物理按键控制模式下的配置; 越界/缺失时回落到固定转速。"""
+        profs = getattr(self.config, 'button_profiles', None) or []
+        p = profs[level - 1] if 1 <= level <= len(profs) else None
+        if not isinstance(p, dict):
+            return {'mode': 'fixed', 'rpm': int(self.config.fixed_rpm or 1200), 'curve': []}
+        return p
+
     def _apply_target(self, rpm: int, now: float, source: str):
         hyst = max(20, int(self.config.curve_hysteresis or 80))
-        if self.config.tec_auto_enabled:
+        if self.config.button_follow_enabled:
+            # 物理按键控制模式: **档位归设备**, 这里只能原样回读的档位, 绝不按转速反推
+            # (旧逻辑 `rpm>=3800→L4` 正是覆盖按键的根源)。
+            level = self._dev_level()
+        elif self.config.tec_auto_enabled:
             level = self._tec_level
         elif rpm >= 3800:
             level = 4
@@ -497,6 +532,9 @@ class DeviceWorker(QThread):
         """风扇档位随温度自动升/降档 (进入阈值 + 回落滞回)。
         档位与风扇目标转速合并到同一帧下发, 三种控制模式通用。"""
         cfg = self.config
+        if cfg.button_follow_enabled:
+            # 物理按键控制模式: **档位归设备物理按键**, 不做任何自动化 (否则与按键打架)
+            return
         if not cfg.tec_auto_enabled:
             self._tec_level = 1
             return
@@ -597,6 +635,37 @@ class DeviceWorker(QThread):
             (0x06, int(round(tp._ram_percent() or 0))),  # 内存占用率%
             (0x07, lt.tm_hour * 60 + lt.tm_min),
         ]
+
+    # ---- 物理按键控制模式 (0.1.10) ----
+    def push_button_profiles(self) -> int:
+        """把 4 个档位的**固定转速**配置写进设备档位槽 (0x24 带 level)。
+
+        写进去之后 **不开工具箱时设备自己也能按每档的固定转速工作**。返回成功写入的档位数。
+
+        ⚠️ `mode='curve'` (智能变频) 的档位**跳过不写**: 它的目标转速由**主机**按该档曲线
+        实时算 (设备读不到 CPU/GPU 温度), 设备侧那一档保持自己的出厂行为即可 ——
+        同时也彻底避开了"往设备 flash 写曲线"的风险 (非法锚点会导致开机循环)。
+        """
+        from .logbuf import LOGBUF
+        if not self.device.connected:
+            return 0
+        src = getattr(self, '_cooling_src', None)
+        ok = skipped = 0
+        for lvl in range(1, 5):
+            prof = self._button_profile(lvl)
+            if prof.get('mode') == 'curve':
+                skipped += 1
+                continue
+            try:
+                self.device.set_fixed_rpm(int(prof.get('rpm') or 0), level=lvl, src=src)
+                ok += 1
+            except Exception as e:
+                LOGBUF.write(f'[按键] L{lvl} 固定转速写入设备失败 (已跳过): {e}')
+            time.sleep(0.08)
+        LOGBUF.write(f'[按键] 固定转速已写入设备档位槽: {ok}/4 档'
+                     + (f'（{skipped} 档为智能变频, 由主机实时驱动, 未写设备）' if skipped else '')
+                     + ('；不开工具箱设备也能保持' if ok else ''))
+        return ok
 
     def push_device_switches(self):
         """下发设备端开关向量 (0x02: 智能启停 + 通电自启) 并 0x03 回读确认,
@@ -1023,10 +1092,21 @@ class DeviceWorker(QThread):
             return
         if now - self._last_host_0x24_ts < 6:
             return                               # 主机刚发过 0x24 → 自己的回声
-        # 物理按钮换档 → 清空下发记忆, 引擎下一 tick 按当前模式立即接管
+        # 物理按钮换档 → 清空下发记忆, 引擎下一 tick 立即生效
         from .logbuf import LOGBUF
         self._last_sent_rpm = None
         self._last_host_0x24_ts = 0
+        if self.config.button_follow_enabled:
+            # 物理按键控制模式: **跟随** —— 不动档位, 按该档的配置执行, 并通知 UI
+            prof = self._button_profile(lvl)
+            desc = (f'固定 {prof.get("rpm")} RPM' if prof.get('mode') != 'curve'
+                    else '智能变频 (该档自己的曲线)')
+            LOGBUF.write(f'[按键] 物理按键换到 L{lvl} (设备 {rpm} RPM) —— 跟随该档配置: {desc}')
+            try:
+                self.deviceGearChanged.emit(lvl, rpm)   # GUI 同步 (标签/托盘)
+            except Exception:
+                pass
+            return
         LOGBUF.write(f'[档位] 物理按钮换档 (L{lvl} · {rpm} RPM) —— 已按当前模式接管')
 
     def _run_screen_upload(self, req):
