@@ -276,7 +276,12 @@ class DeviceWorker(QThread):
             self.statusChanged.emit(st)
 
         cpu_raw, gpu_raw = self.temps.snapshot()
-        cpu, gpu = self._process_temp(cpu_raw, 'cpu'), self._process_temp(gpu_raw, 'gpu')
+        # ⚠️ 显示 / 历史 / 屏幕推送用**仅尖峰过滤**的原始值; EMA 平滑只服务风扇控制。
+        # 2026-10-17 用户反馈"CPU/GPU 温度都不准确": 旧版把平滑后的值同时用于显示, 温度一变
+        # 界面读数就滞后真实值 (对比 AIDA64 自然觉得不准)。平滑的目的是防曲线抖动, 不该
+        # 影响"我看到的温度是多少"。
+        cpu, gpu = self._spike_filtered(cpu_raw, 'cpu'), self._spike_filtered(gpu_raw, 'gpu')
+        cpu_ctl, gpu_ctl = self._process_temp(cpu_raw, 'cpu'), self._process_temp(gpu_raw, 'gpu')
         self.tempsChanged.emit(cpu, gpu)
         self._temp_hist.append((time.time(), cpu or gpu or 0))
 
@@ -303,7 +308,7 @@ class DeviceWorker(QThread):
         if self.config.button_follow_enabled:
             self._gear_sync_tick(now, force=True)
         # 控制引擎
-        self._control_tick(cpu, gpu, now)
+        self._control_tick(cpu_ctl, gpu_ctl, now)   # 控制用平滑值 (显示用的是上面未平滑的)
 
         # 屏幕信息卡维持 (连接恢复 + 情境卡片决策)
         self._screen_tick(now, cpu, gpu)
@@ -329,6 +334,29 @@ class DeviceWorker(QThread):
         self.msleep(60)
 
     # ============ 温度处理链 ============
+    def _spike_filtered(self, raw: float, channel: str) -> float:
+        """**仅尖峰过滤** (不做 EMA): 供显示 / 历史 / 屏幕推送使用。
+
+        与 `_process_temp` 的分工:
+        - `_process_temp` = 尖峰过滤 + EMA 平滑 → **风扇控制** (防曲线抖动)
+        - `_spike_filtered` = 尖峰过滤 → **给人看的温度** (保持真实、不滞后)
+        2026-10-17 用户反馈"温度不准": 旧版把 EMA 值也拿去显示, 温度变化时界面滞后。
+        """
+        st = self._temp_state.setdefault(channel + ':disp',
+                                         {'last_raw': None, 'rejects': 0, 'last_ok': None})
+        if not raw or raw <= 1:
+            return st['last_ok'] or 0.0
+        if self.config.spike_filter and st['last_raw'] is not None:
+            if abs(raw - st['last_raw']) > 12.0:
+                st['rejects'] = st.get('rejects', 0) + 1
+                if st['rejects'] < 3:          # 连续 3 次才接受 (与 _process_temp 同规则)
+                    return st['last_ok'] if st['last_ok'] is not None else raw
+            else:
+                st['rejects'] = 0
+        st['last_raw'] = raw
+        st['last_ok'] = raw
+        return raw
+
     def _process_temp(self, raw: float, channel: str) -> float:
         """尖峰过滤 + EMA 平滑 (功能 #4)。每个通道独立状态, 无数据时保持自身上次值。"""
         st = self._temp_state.setdefault(channel, {'ema': None, 'last_raw': None})

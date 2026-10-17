@@ -1652,7 +1652,9 @@ class ControlPage(QWidget):
         self.cmb_smooth.addItems(['1 · 即时跟随', '2 · 弱平滑', '3 · 默认', '5 · 较强平滑', '10 · 强平滑'])
         self.cmb_smooth.setCurrentIndex({1: 0, 2: 1, 3: 2, 5: 3, 10: 4}.get(cfg.temp_smoothing, 2))
         self.cmb_smooth.currentIndexChanged.connect(self._smooth_changed)
-        self.row_smooth = _setting_row('温度平滑度', 'EMA 指数加权: 越大越稳, 越小越跟手', '🌊', self.cmb_smooth)
+        self.row_smooth = _setting_row('温度平滑度', 'EMA 指数加权: 越大越稳, 越小越跟手'
+                                                     '（仅作用于风扇控制; 界面显示的始终是真实温度）',
+                                       '🌊', self.cmb_smooth)
         cv2.addWidget(self.row_smooth)
         self.tgl_spike = Toggle(cfg.spike_filter)
         self.tgl_spike.toggled = self._spike_changed

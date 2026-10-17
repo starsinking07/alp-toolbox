@@ -377,7 +377,7 @@ check('开关切换不写设备 (只有改配置才写)',
 # --- 跟随模式: 必须"先读档再下发", 否则会用旧档位把按键覆盖回去 (2026-10-11 用户反馈) ---
 _tick_src = _ins.getsource(_svc.DeviceWorker._tick)
 _i_read = _tick_src.find('_gear_sync_tick(now, force=True)')
-_i_ctrl = _tick_src.find('self._control_tick(cpu, gpu, now)')
+_i_ctrl = _tick_src.find('self._control_tick(')
 check('跟随模式先读档再下发 (顺序反了就会覆盖按键)',
       0 <= _i_read < _i_ctrl)
 _gsrc = _ins.getsource(_svc.DeviceWorker._gear_sync_tick)
@@ -465,6 +465,25 @@ if _MW2 is not None:
           if hasattr(_MW2, '_on_hotkey') else True)
     check('手动挡位提示随原因变化 (不再固定写"智能变频运行中")',
           'why or' in _ins.getsource(_CP2._sync_manual_enabled))
+
+    # --- 温度显示不再被 EMA 拖慢 (2026-10-17 用户反馈"CPU/GPU 温度都不准确") ---
+    print('=== 温度显示 vs 控制平滑 ===')
+    check('有仅尖峰过滤的显示专用函数', hasattr(_svc.DeviceWorker, '_spike_filtered'))
+    _tick_t = _ins.getsource(_svc.DeviceWorker._tick)
+    check('tempsChanged 发射未平滑值 (显示要真实)', '_spike_filtered' in _tick_t
+          and 'tempsChanged.emit(cpu, gpu)' in _tick_t)
+    check('风扇控制仍用平滑值', '_control_tick(cpu_ctl, gpu_ctl' in _tick_t)
+    _wt = _svc.DeviceWorker.__new__(_svc.DeviceWorker)
+    _wt.config = cfg
+    _wt._temp_state = {}
+    for _ in range(3):
+        _wt._spike_filtered(40.0, 'cpu')
+        _wt._process_temp(40.0, 'cpu')
+    check('显示立即跟随真实温度 (45 就是 45)', abs(_wt._spike_filtered(45.0, 'cpu') - 45.0) < 0.01)
+    check('控制仍按 EMA 缓升 (曲线不抖)', _wt._process_temp(45.0, 'cpu') < 45.0)
+    _wt._temp_state = {}
+    _wt._spike_filtered(40.0, 'cpu')
+    check('尖峰过滤仍生效 (单帧 40→90 被拒)', _wt._spike_filtered(90.0, 'cpu') == 40.0)
 
     # --- GitHub issue #1 三连修复 (2026-10-11) ---
     print('=== GitHub issue #1 修复 ===')
