@@ -485,6 +485,16 @@ if _MW2 is not None:
     _wt._spike_filtered(40.0, 'cpu')
     check('尖峰过滤仍生效 (单帧 40→90 被拒)', _wt._spike_filtered(90.0, 'cpu') == 40.0)
 
+    # --- CPU 温度取值: Package 优先 (2026-10-18 用户反馈"一直偏高一些") ---
+    print('=== CPU 温度取值优先级 ===')
+    from brb02.temps import TempReader as _TR
+    check('有 Package 时用 Package (不把各传感器混起来取 max)',
+          _TR._pick_cpu({'package': [51.0], 'tctl': [64.0], 'core': [64.0]}) == 51.0)
+    check('无 Package 时用 Tdie', _TR._pick_cpu({'tdie': [52.0], 'core': [64.0]}) == 52.0)
+    check('只有各核时取中位数 (抗单核尖刺)',
+          _TR._pick_cpu({'core': [38, 43, 45, 49, 64]}) == 45.0)
+    check('_scan_cpu 按类型分类收集', "setdefault('package'" in _ins.getsource(_TR._scan_cpu))
+
     # --- GitHub issue #1 三连修复 (2026-10-11) ---
     print('=== GitHub issue #1 修复 ===')
     _sig = list(_ins.signature(_svc.DeviceWorker.start_image_upload).parameters)[1:]

@@ -117,7 +117,7 @@ class TempReader:
             cpu_name = ''
             gpu_name = ''
             try:
-                cpu_hits = []
+                cpu_hits = {}
                 for hw in computer.Hardware:
                     hw.Update()
                     ht = str(hw.HardwareType)
@@ -129,9 +129,8 @@ class TempReader:
                     if 'Gpu' in ht:
                         g_temp, g_hs, g_power = self._scan_gpu(hw)
                         gpus.append((hw_name, g_temp, g_hs, g_power))
-                # CPU
-                if cpu_hits:
-                    cpu = max(cpu_hits)
+                # CPU (Package 优先; 不再把所有传感器混起来取 max, 见 _pick_cpu)
+                cpu = self._pick_cpu(cpu_hits)
                 # GPU 选择: NVIDIA 优先, 其次 AMD, 再 Intel; 同厂商取温度高的
                 def _prio(name: str) -> int:
                     n = name.lower()
@@ -173,19 +172,48 @@ class TempReader:
     def _valid(self, v) -> bool:
         return v is not None and 1.0 < float(v) < 120.0
 
-    def _scan_cpu(self, hw, cpu_out):
+    def _scan_cpu(self, hw, cpu_out: dict):
+        """收集 CPU 温度候选, **按类型分类** (由 `_pick_cpu` 决定用哪个)。
+
+        ⚠️ 2026-10-18 用户反馈"CPU 温度一直偏高一些"(工具箱 64°C vs AIDA64 Package 51°C):
+        旧版把所有匹配项 (Package / Tctl/Tdie / Core #N (SMU)) 混在一个列表里取 **max**,
+        而 AMD 的 SMU 单核读数与 Tctl 可能带偏移 ⇒ 最大值比真实封装温度高 10°C+。
+        """
         for s in hw.Sensors:
             if 'Temperature' not in str(s.SensorType) or not self._valid(s.Value):
                 continue
             n = str(s.Name)
-            if 'Tctl' in n or 'Tdie' in n or 'Core' in n or 'Package' in n:
-                cpu_out.append(float(s.Value))
+            v = float(s.Value)
+            if 'Package' in n:
+                cpu_out.setdefault('package', []).append(v)
+            elif 'Tdie' in n:
+                cpu_out.setdefault('tdie', []).append(v)
+            elif 'Tctl' in n:
+                cpu_out.setdefault('tctl', []).append(v)
+            elif 'Core' in n:
+                cpu_out.setdefault('core', []).append(v)
         for sub in hw.SubHardware:
             try:
                 sub.Update()
             except Exception:
                 pass
             self._scan_cpu(sub, cpu_out)
+
+    @staticmethod
+    def _pick_cpu(out: dict) -> float:
+        """CPU 温度取值优先级: **Package > Tdie > Tctl > 各核中位数**。
+
+        Package 是 AMD/Intel 都标准的封装温度, 与 AIDA64 / HWiNFO 的 "CPU Package" 口径一致。
+        各核中位数作为兜底 (抗单核尖刺)。绝不把不同量纲的传感器混在一起取最大值。
+        """
+        for key in ('package', 'tdie', 'tctl'):
+            vals = out.get(key) or []
+            if vals:
+                return max(vals)
+        cores = sorted(out.get('core') or [])
+        if cores:
+            return cores[len(cores) // 2]
+        return 0.0
 
     def _scan_gpu(self, hw) -> tuple[float | None, float | None, float | None]:
         """返回 (温度, 热点温度, 功耗W)"""
