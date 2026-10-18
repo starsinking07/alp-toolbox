@@ -495,6 +495,26 @@ if _MW2 is not None:
           _TR._pick_cpu({'core': [38, 43, 45, 49, 64]}) == 45.0)
     check('_scan_cpu 按类型分类收集', "setdefault('package'" in _ins.getsource(_TR._scan_cpu))
 
+    # --- 手动挡位 15 档必须单调递增 (2026-10-18 用户反馈"7档 1470 比 6档还低") ---
+    print('=== 手动挡位 15 档映射 ===')
+    from brb02.gui.pages import CurvePage as _CVP2
+
+    class _CfgS:
+        presets = {'低噪': 1100, '平衡': 1600, '强效': 2100, '超频': 4000, '极限': 4800}
+
+    class _StubS:
+        ctx = {'cfg': _CfgS()}
+        _gear_rpm = _CVP2._gear_rpm
+
+    _ss = _StubS()
+    _rpms = [_CVP2._level_rpm(_ss, k) for k in range(15)]
+    check('15 档转速严格单调递增', all(b > a for a, b in zip(_rpms, _rpms[1:])))
+    check('7 档高于 6 档 (修 1470 < 1600)', _rpms[6] > _rpms[5])
+    check('档位基准取自配置预设 (键名显式映射, 不再查不到)',
+          _CVP2._gear_rpm(_ss, 0) == 1100 and _CVP2._gear_rpm(_ss, 4) == 4800)
+    check('档位按钮落点 = 该档基准转速',
+          _CVP2._level_rpm(_ss, 5) == 1600 and _CVP2._level_rpm(_ss, 14) == 4800)
+
     # --- GitHub issue #1 三连修复 (2026-10-11) ---
     print('=== GitHub issue #1 修复 ===')
     _sig = list(_ins.signature(_svc.DeviceWorker.start_image_upload).parameters)[1:]

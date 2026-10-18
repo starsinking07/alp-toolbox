@@ -33,7 +33,8 @@ GEARS = [
     ('极限', '#ef4444'),
 ]
 MAX_RPM = 4800
-GEAR_SUB = [0.70, 0.85, 1.0]
+# 档位基准转速的配置键 (⚠️ 与 GEARS 的**显示名**不同, 历史遗留两套命名; 2026-10-18 修正)
+GEAR_PRESET_KEYS = ['低噪', '平衡', '强效', '超频', '极限']
 
 
 def _card(title=None, hint=None):
@@ -962,7 +963,33 @@ class CurvePage(QWidget):
 
     # ---- 挡位 ----
     def _gear_rpm(self, gear: int) -> int:
-        return self.ctx['cfg'].presets.get(GEARS[gear][0], [1100, 1600, 2100, 4000, 4800][gear])
+        """档位基准转速: 优先取配置里的预设值。
+
+        ⚠️ 2026-10-18: 旧版用 `presets.get(GEARS[gear][0])` 查 "静音/标准/强劲…", 而配置里的
+        键是 "低噪/平衡/强效…" ⇒ **永远查不到, 一直走硬编码兜底**, 用户改预设无效。
+        现显式映射键名。
+        """
+        cfg = self.ctx['cfg'].presets or {}
+        key = GEAR_PRESET_KEYS[gear]
+        if key in cfg:
+            try:
+                return int(cfg[key])
+            except (TypeError, ValueError):
+                pass
+        return [1100, 1600, 2100, 4000, 4800][gear]
+
+    def _level_rpm(self, k: int) -> int:
+        """15 档 → RPM, **严格单调递增** (每档 3 小格, 跨在相邻两个预设之间线性插值)。
+
+        ⚠️ 2026-10-18 用户反馈"7档目标转速 1470, 比 6档还低": 旧实现是
+        `base[gear] * GEAR_SUB[sub]` (70%/85%/100%) —— 进入新档位时第一小格只有 70%,
+        反而低于上一档的满档 (7档 2100×0.7=1470 < 6档 1600×1.0=1600)。现改为
+        "上一档基准 → 本档基准"之间三等分, 保证 1→15 档转速单调递增。
+        """
+        gear, sub = k // 3, k % 3
+        cur = self._gear_rpm(gear)
+        lo = int(cur * 0.70) if gear == 0 else self._gear_rpm(gear - 1)
+        return int(lo + (cur - lo) * (sub + 1) / 3)
 
     def _gear_clicked(self, gear: int):
         rpm = self._gear_rpm(gear)
@@ -974,7 +1001,7 @@ class CurvePage(QWidget):
 
     def _level_selected(self, k: int):
         gear, sub = k // 3, k % 3
-        rpm = int(self._gear_rpm(gear) * GEAR_SUB[sub])
+        rpm = self._level_rpm(k)          # 单调递增映射 (见 _level_rpm 注释)
         self.ctx['worker'].apply_fixed_rpm(rpm)
         self.ctx['worker'].gear_light_hook(gear)
         self.ctx['cfg'].fixed_rpm = rpm
