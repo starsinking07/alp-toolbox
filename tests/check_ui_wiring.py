@@ -523,6 +523,12 @@ if _MW2 is not None:
     check('保活重发固定转速', 'set_fixed_rpm' in _ka)
     check('跟随模式用设备当前档位 (不覆盖物理按键)', '_dev_level()' in _ka)
     check('定期重申控制源 0x22=01', 'mark_host_control' in _ka)
+    # ⚠️ 2026-10-19 实机崩溃回归: _stop 是 bool 标志, 不是 threading.Event
+    check('保活用 bool 标志而非 Event (修 0.1.13 的 is_set 崩溃)',
+          'self._stop.is_set()' not in _ka and 'while not self._stop' in _ka)
+    _wi = _ins.getsource(_svc.DeviceWorker.__init__)
+    check('DeviceWorker._stop 初始化为 bool (与保活假设一致)',
+          'self._stop = False' in _wi or 'self._stop: bool' in _wi)
 
     # --- GitHub issue #1 三连修复 (2026-10-11) ---
     print('=== GitHub issue #1 修复 ===')

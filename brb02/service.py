@@ -175,7 +175,10 @@ class DeviceWorker(QThread):
 
         def _loop():
             ticks = 0
-            while not self._stop.is_set():
+            # ⚠️ `DeviceWorker._stop` 是 **bool 标志** (见 __init__: self._stop = False),
+            # 不是 threading.Event —— 旧实现按 Event 写了 .is_set()/.wait(), 线程一启动就
+            # AttributeError: 'bool' object has no attribute 'is_set' (2026-10-19 用户实测崩溃)。
+            while not self._stop:
                 try:
                     if self.device.connected:
                         # 每 ~10s 重申一次控制源=01 (主机托管): 官方开场只发一次, 但实测
@@ -197,8 +200,7 @@ class DeviceWorker(QThread):
                 except Exception:
                     pass
                 ticks += 1
-                if self._stop.wait(self.KEEPALIVE_S):
-                    break
+                time.sleep(self.KEEPALIVE_S)
 
         self._ka_thread = threading.Thread(target=_loop, name='0x24-keepalive', daemon=True)
         self._ka_thread.start()
