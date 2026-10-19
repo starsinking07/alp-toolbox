@@ -515,6 +515,15 @@ if _MW2 is not None:
     check('档位按钮落点 = 该档基准转速',
           _CVP2._level_rpm(_ss, 5) == 1600 and _CVP2._level_rpm(_ss, 14) == 4800)
 
+    # --- 0x24 快速保活 (2026-10-19 用户反馈"目标 1700 实际 2000+，1550~1800 稳不住") ---
+    print('=== 0x24 快速保活 ===')
+    check('保活周期 ≤ 0.5s (协议 §4.2 要求 ~0.4s)', _svc.DeviceWorker.KEEPALIVE_S <= 0.5)
+    _ka = _ins.getsource(_svc.DeviceWorker._start_keepalive)
+    check('保活线程随 worker 启动', '_start_keepalive()' in _ins.getsource(_svc.DeviceWorker.run))
+    check('保活重发固定转速', 'set_fixed_rpm' in _ka)
+    check('跟随模式用设备当前档位 (不覆盖物理按键)', '_dev_level()' in _ka)
+    check('定期重申控制源 0x22=01', 'mark_host_control' in _ka)
+
     # --- GitHub issue #1 三连修复 (2026-10-11) ---
     print('=== GitHub issue #1 修复 ===')
     _sig = list(_ins.signature(_svc.DeviceWorker.start_image_upload).parameters)[1:]

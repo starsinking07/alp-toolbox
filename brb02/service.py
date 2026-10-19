@@ -157,8 +157,55 @@ class DeviceWorker(QThread):
         self._screen_cancel.set()
         self.temps.stop()
 
+    # ---- 0x24 快速保活 (2026-10-19) ----
+    KEEPALIVE_S = 0.4
+
+    def _start_keepalive(self):
+        """每 0.4s 重发一次当前固定转速/档位。
+
+        ⚠️ **这是"目标转速与实际不符"的根因修复** (2026-10-19 用户反馈: 目标 1700 实际
+        2000+，1550~1800 区间怎么都稳不住)。PROTOCOL.md §4.2 明确:
+        控制源=00(设备自控)时, 单次 0x24 固定转速会在 **~1 秒内被设备自动曲线夺回**,
+        要持续保持**需以 ~0.4s 周期重发**。旧版保活是 5 秒 (`due > 5.0`), 中间 4 秒设备
+        一直跑自己的曲线 ⇒ 实际转速跟着温度走, 与设定值无关 (1500→1590 是曲线恰好在
+        该温度的值, 1700→2000+ 同理)。
+        """
+        if getattr(self, '_ka_thread', None) is not None:
+            return
+
+        def _loop():
+            ticks = 0
+            while not self._stop.is_set():
+                try:
+                    if self.device.connected:
+                        # 每 ~10s 重申一次控制源=01 (主机托管): 官方开场只发一次, 但实测
+                        # 设备在部分路径 (屏操作/重连) 后会回落到自控, 重申一次即可复位。
+                        if ticks % 25 == 0:
+                            self.device.mark_host_control()
+                        if (not self._uploading
+                                and self._last_sent_rpm is not None
+                                and self._last_tec_sent):
+                            # ⚠️ 跟随物理按键模式: 档位归设备 —— 必须用**设备当前档位**,
+                            # 不能用上次算出来的 (否则保活会把用户刚按的档位覆盖回去)。
+                            lvl = (self._dev_level() if self.config.button_follow_enabled
+                                   else self._last_tec_sent)
+                            self.device.set_fixed_rpm(
+                                self._last_sent_rpm, level=lvl,
+                                src=getattr(self, '_cooling_src', None))
+                            # 与正常下发一样记账: 免得档位同步把主机自己的 0x24 误判成"设备换档"
+                            self._last_host_0x24_ts = time.time()
+                except Exception:
+                    pass
+                ticks += 1
+                if self._stop.wait(self.KEEPALIVE_S):
+                    break
+
+        self._ka_thread = threading.Thread(target=_loop, name='0x24-keepalive', daemon=True)
+        self._ka_thread.start()
+
     def run(self):
         self.temps.start()
+        self._start_keepalive()
         info_timer = 0.0
         while not self._stop:
             try:
