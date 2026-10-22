@@ -275,15 +275,20 @@ class Brb02Device:
         return True
 
     # ---- 控制 ----
-    def set_fixed_rpm(self, rpm: int, level: int | None = None, src: int | None = None):
+    def set_fixed_rpm(self, rpm: int, level: int | None = None, src: int | None = None,
+                      wait_s: float = 0.3, max_rx: int = 6):
         """设置固定转速 (0..4800)。
         level=None 时按转速自动选档 (>2800 → 档位 4);
-        也可显式指定 1-4 (档位自动切换模式下由引擎传入)。"""
+        也可显式指定 1-4 (档位自动切换模式下由引擎传入)。
+
+        wait_s/max_rx: 保活路径可传小值 (如 0.05/1), 否则每帧阻塞 0.3s 会饿死主循环
+        (2026-10-21 实测: 0.4s 保活 + 0.3s 等待 ⇒ 4s 窗口收不到一个 0x06 上报)。"""
         rpm = max(0, min(self.MAX_RPM, int(rpm)))
         if level is None:
             level = 4 if rpm > 2800 else 1
         level = max(1, min(4, int(level)))
-        self._send(protocol.set_cooling_fixed(rpm, level=level, src=src), wait_s=0.3)
+        self._send(protocol.set_cooling_fixed(rpm, level=level, src=src),
+                   wait_s=wait_s, max_rx=max_rx)
 
     def set_curve(self, anchors, level: int | None = None, src: int | None = None):
         """写入智能变频曲线 (4 锚点)。⚠️ 只允许写入来自 get_curve 的合法值。

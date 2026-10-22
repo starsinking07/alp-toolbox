@@ -147,8 +147,75 @@ class DeviceWorker(QThread):
         self._last_dev_level = None          # 设备侧最近档位 (0x25 'on')
         self._last_dev_rpm = None            # 设备侧最近目标转速 (0x25 'rpm')
         self._last_host_0x24_ts = 0.0        # 主机最近一次发 0x24 的时刻 (区分按钮/主机变更)
+        # 转速补偿 (2026-10-21 真机标定: 设备实测比目标高 ~200 rpm, 与保活周期无关)
+        self._rpm_trim = 0                   # loop 模式的当前补偿量 (rpm)
+        self._last_cmd_rpm = None            # 最近一次**实际下发**的转速 (含补偿)
+        self._last_trim_ts = 0.0             # loop 模式上次调整时刻
+        self._last_status_ts = 0.0           # 最近一次 0x06 上报时刻 (判数据新鲜度)
         # GUI 主动连接 (点"连接"/换通道): 蓝牙允许等满 45s; 自动重连走短扫描
         self._user_connect = False
+
+    # ---- 转速补偿 (2026-10-21) ----
+    TRIM_TICK_S = 5.0          # loop 模式调整周期
+    TRIM_DEADBAND = 60         # 死区 (0x06 分辨率 30 rpm, 取 2 步)
+    TRIM_STEP = 60             # 单次最大调整量
+    TRIM_STALE_S = 3.0         # 上报超过这么久就不参与计算
+
+    def _trim_rpm(self, rpm: int) -> int:
+        """用户目标 → 实际下发值。设备实测比目标高约 +200 rpm (1400~2600 实测),
+        这是设备端偏移 (与保活周期无关, 三组周期实测值逐项相同)。"""
+        rpm = int(rpm)
+        if rpm <= 0:
+            return rpm
+        mode = getattr(self.config, 'rpm_trim_mode', 'off')
+        if mode == 'off':
+            return rpm
+        limit = max(0, int(getattr(self.config, 'rpm_trim_limit', 400) or 0))
+        if mode == 'fixed':
+            off = int(getattr(self.config, 'rpm_trim_offset', -200) or 0)
+        else:
+            off = int(getattr(self, '_rpm_trim', 0) or 0)
+        off = max(-limit, min(limit, off))
+        return max(0, min(self.device.MAX_RPM, rpm + off))
+
+    def _push_fixed(self, rpm: int, level: int, src=None,
+                    wait_s: float = 0.3, max_rx: int = 6):
+        """下发固定转速 (含补偿)。保活路径传 wait_s=0.05/max_rx=1, 不阻塞读循环。"""
+        cmd = self._trim_rpm(rpm)
+        self.device.set_fixed_rpm(cmd, level=level, src=src,
+                                  wait_s=wait_s, max_rx=max_rx)
+        self._last_cmd_rpm = cmd
+        return cmd
+
+    def _update_rpm_trim(self, now: float):
+        """loop 模式: 用 0x06 实测值闭环微调下发量 (死区 ±60, 每次最多 ±60)。"""
+        if getattr(self.config, 'rpm_trim_mode', 'off') != 'loop':
+            return
+        if not self.device.connected or not self._last_sent_rpm:
+            return
+        st = self._last_status or {}
+        measured = st.get('rpm')
+        if not measured or now - self._last_status_ts > self.TRIM_STALE_S:
+            return
+        if now - self._last_trim_ts < self.TRIM_TICK_S:
+            return
+        self._last_trim_ts = now
+        err = int(self._last_sent_rpm) - int(measured)   # 正 = 实测偏低, 需要加大
+        if abs(err) <= self.TRIM_DEADBAND:
+            return
+        step = max(-self.TRIM_STEP, min(self.TRIM_STEP, err))
+        limit = max(0, int(getattr(self.config, 'rpm_trim_limit', 400) or 0))
+        new = max(-limit, min(limit, int(getattr(self, '_rpm_trim', 0) or 0) + step))
+        if new == self._rpm_trim:
+            return
+        self._rpm_trim = new
+        self._last_sent_rpm = None        # 触发下一 tick 立即重发 (带新补偿)
+        try:
+            from .logbuf import LOGBUF
+            LOGBUF.write(f'[补偿] 实测 {measured} vs 目标 {self._last_cmd_rpm} '
+                         f'(误差 {err:+d}) → 补偿量 {new:+d} rpm')
+        except Exception:
+            pass
 
     # ============ 主循环 ============
     def stop(self):
@@ -192,9 +259,12 @@ class DeviceWorker(QThread):
                             # 不能用上次算出来的 (否则保活会把用户刚按的档位覆盖回去)。
                             lvl = (self._dev_level() if self.config.button_follow_enabled
                                    else self._last_tec_sent)
-                            self.device.set_fixed_rpm(
-                                self._last_sent_rpm, level=lvl,
-                                src=getattr(self, '_cooling_src', None))
+                            # ⚠️ 必须短等待: set_fixed_rpm 默认 wait_s=0.3, 而这里 0.4s 一轮,
+                            # 0.3s 攥着设备锁 ⇒ 主循环 poll_report 抢不到锁, 0x06 上报被吞
+                            # (2026-10-21 实测: 4s 窗口一个 0x06 都没收到)。
+                            self._push_fixed(self._last_sent_rpm, lvl,
+                                             src=getattr(self, '_cooling_src', None),
+                                             wait_s=0.05, max_rx=1)
                             # 与正常下发一样记账: 免得档位同步把主机自己的 0x24 误判成"设备换档"
                             self._last_host_0x24_ts = time.time()
                 except Exception:
@@ -322,6 +392,7 @@ class DeviceWorker(QThread):
         else:
             self._miss_streak = 0
             self._last_status = st
+            self._last_status_ts = time.time()
             self.statusChanged.emit(st)
 
         cpu_raw, gpu_raw = self.temps.snapshot()
@@ -356,6 +427,8 @@ class DeviceWorker(QThread):
         # 自己改回去的档位)。跟随模式下每 tick 都读 (不再 4s 节流), 保证下发用的是新鲜档位。
         if self.config.button_follow_enabled:
             self._gear_sync_tick(now, force=True)
+        # 转速闭环补偿 (loop 模式): 用刚收到的 0x06 实测值微调下发量
+        self._update_rpm_trim(now)
         # 控制引擎
         self._control_tick(cpu_ctl, gpu_ctl, now)   # 控制用平滑值 (显示用的是上面未平滑的)
 
@@ -587,7 +660,7 @@ class DeviceWorker(QThread):
         if self._last_sent_rpm is None or stop_now or \
            abs(rpm - self._last_sent_rpm) >= hyst or due or \
            (self.config.tec_auto_enabled and level != self._last_tec_sent):
-            self.device.set_fixed_rpm(rpm, level=level, src=getattr(self, '_cooling_src', None))
+            self._push_fixed(rpm, level, src=getattr(self, '_cooling_src', None))
             self._last_host_0x24_ts = time.time()   # 主机 0x24 (区分设备按钮变更)
             self._last_sent_rpm = rpm
             self._last_send_ts = now
@@ -608,7 +681,7 @@ class DeviceWorker(QThread):
             LOGBUF.write(f'[档位] 设备未连接, 已记忆目标 {mem} RPM (L{level}) —— 重连后自动恢复')
             return
         try:
-            self.device.set_fixed_rpm(mem, level=level, src=getattr(self, '_cooling_src', None))
+            self._push_fixed(mem, level, src=getattr(self, '_cooling_src', None))
             self._last_sent_rpm = mem
             self._last_tec_sent = level
             self._last_host_0x24_ts = now
@@ -642,7 +715,7 @@ class DeviceWorker(QThread):
             self._last_tec_change_ts = now   # 换档 = 设备写曲线 flash; 屏幕上屏需避让
             rpm_now = self._last_sent_rpm or cfg.fixed_rpm or 0
             try:
-                self.device.set_fixed_rpm(rpm_now, level=lvl, src=getattr(self, '_cooling_src', None))
+                self._push_fixed(rpm_now, lvl, src=getattr(self, '_cooling_src', None))
                 self._last_tec_sent = lvl
                 self._last_host_0x24_ts = now   # 主机直发换档, 防 0x25 轮询误判成设备按钮 (审计 G5)
             except Exception as e:
@@ -759,7 +832,7 @@ class DeviceWorker(QThread):
                 skipped += 1
                 continue
             try:
-                self.device.set_fixed_rpm(int(prof.get('rpm') or 0), level=lvl, src=src)
+                self._push_fixed(int(prof.get('rpm') or 0), lvl, src=src)
                 ok += 1
             except Exception as e:
                 LOGBUF.write(f'[按键] L{lvl} 固定转速写入设备失败 (已跳过): {e}')
@@ -855,9 +928,18 @@ class DeviceWorker(QThread):
             if self.device.connected and not self._uploading:
                 self.device._send(protocol.build_frame(0x15, bytes([level & 0xFF])))
 
-        self._audio_pusher = AudioLevelPusher(cb, log=lambda s: LOGBUF.write(s))
+        self._audio_pusher = AudioLevelPusher(
+            cb, log=lambda s: LOGBUF.write(s),
+            sensitivity=getattr(self.config, 'audio_sens', 'medium'))
         self._audio_pusher.start()
         LOGBUF.write('[灯效] 音频同步电平推送已启动 (0x15)')
+
+    def set_audio_sensitivity(self, name: str):
+        """参数页改灵敏度: 落配置 + 运行中的推送器立即生效。"""
+        self.config.audio_sens = str(name or 'medium').lower()
+        self.config.save()
+        if self._audio_pusher is not None:
+            self._audio_pusher.set_sensitivity(self.config.audio_sens)
 
     def _stop_audio(self):
         if self._audio_pusher is not None:
@@ -1456,7 +1538,7 @@ class DeviceWorker(QThread):
         try:
             rpm = int(prof.get('rpm', 0) or 0)
             if rpm > 0:
-                self.device.set_fixed_rpm(rpm, src=getattr(self, '_cooling_src', None))
+                self._push_fixed(rpm, self._dev_level(), src=getattr(self, '_cooling_src', None))
                 self._last_sent_rpm = rpm
                 self._last_host_0x24_ts = time.time()
                 self._manual_until = time.time() + 10
@@ -1591,7 +1673,7 @@ class DeviceWorker(QThread):
         # (此前 level=None 走设备层二值映射 >2800→L4, L2/L3 永远发不出来, v3.65)
         level = 4 if rpm >= 3800 else 3 if rpm >= 3000 else 2 if rpm >= 2400 else 1
         try:
-            self.device.set_fixed_rpm(rpm, level=level, src=getattr(self, '_cooling_src', None))
+            self._push_fixed(rpm, level, src=getattr(self, '_cooling_src', None))
         except Exception as e:
             if quiet:
                 return

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import zipfile
 from dataclasses import asdict
 from datetime import datetime
 
-APP_VERSION = '0.1.14'
+APP_VERSION = '0.1.15'
 
 
 def export_diagnostics(cfg, worker, log_text: str, out_path: str) -> str:
@@ -30,7 +31,14 @@ def export_diagnostics(cfg, worker, log_text: str, out_path: str) -> str:
         'tecAutoEnabled': cfg.tec_auto_enabled,
         'tecLevel': worker._tec_level,
         'lastSentRpm': worker._last_sent_rpm,
+        'lastCmdRpm': getattr(worker, '_last_cmd_rpm', None),   # 实际下发值 (含补偿)
+        'rpmTrimMode': getattr(cfg, 'rpm_trim_mode', 'off'),
+        'rpmTrim': (getattr(cfg, 'rpm_trim_offset', 0)
+                    if getattr(cfg, 'rpm_trim_mode', 'off') == 'fixed'
+                    else getattr(worker, '_rpm_trim', 0)),
         'deviceRpm': (worker._last_status or {}).get('rpm'),
+        'statusAgeS': (round(time.time() - getattr(worker, '_last_status_ts', 0), 1)
+                       if getattr(worker, '_last_status_ts', 0) else None),
         'cpuTemp': t.cpu, 'gpuTemp': t.gpu,
         'cpuPower': t.cpu_power, 'gpuPower': t.gpu_power,
         'cpuName': t.cpu_name, 'gpuName': t.gpu_name,

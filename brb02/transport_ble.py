@@ -90,6 +90,17 @@ class TransportBLE:
                     print(f'[ble RX] {bytes(data).hex(" ")}')
 
         await self._client.start_notify(UUID_NOTIFY, _on_rx)
+        # 记录协商后的 MTU (2026-10-21): 官方 WinRT 栈不做显式 MTU 协商, 靠系统默认;
+        # 若这里 <29 则 0x07(26B) 会发不出去, 诊断包里有这个值就能直接判。
+        try:
+            mtu = self._client.mtu_size
+            from .logbuf import LOGBUF
+            LOGBUF.write(f'[BLE] 已连接, 协商 MTU={mtu}')
+            if mtu and mtu < 29:
+                LOGBUF.write(f'[BLE] ⚠️ MTU {mtu} 偏小 (<29): 26B 的 0x07 参数推送将跳过, '
+                             f'屏幕参数页不会刷新; 需要完整功能请用 USB')
+        except Exception:
+            pass
         self._ready.set()
         return True
 
@@ -109,11 +120,20 @@ class TransportBLE:
             mtu = self._client.mtu_size
         except Exception:
             mtu = None
-        # ATT 写开销 3 字节: 帧长+3 超 MTU 时 write_gatt_char 会被拒/失败 —— 仅告警一次 (审计 G21)
-        if mtu is not None and len(data) + 3 > mtu and not self._mtu_warned:
-            self._mtu_warned = True
-            from .logbuf import LOGBUF
-            LOGBUF.write(f'[BLE] 帧长 {len(data)}+3 超 MTU {mtu}, GATT 写入可能被拒 (仅告警一次)')
+        # ATT 写开销 3 字节: 帧长+3 超 MTU 时 GATT 必拒。
+        # 2026-10-21: 以前只告警仍照发 —— 0x07 是 26B, 默认 MTU 23 时每秒都失败,
+        # 异常一路上抛变成"内部错误"刷屏。现在直接跳过并只记一次日志 (屏幕参数页在
+        # 小 MTU 的蓝牙下会保持空白, 但风扇控制不受影响, 属可接受降级)。
+        if mtu is not None and len(data) + 3 > mtu:
+            if not self._mtu_warned:
+                self._mtu_warned = True
+                try:
+                    from .logbuf import LOGBUF
+                    LOGBUF.write(f'[BLE] MTU={mtu} 放不下 {len(data)}B 帧 (需 ≥{len(data) + 3}), '
+                                 f'已跳过此类帧; 屏幕参数页可能不刷新, 完整功能请用 USB')
+                except Exception:
+                    pass
+            return 0
         self._sched(self._client.write_gatt_char(UUID_WRITE, data, response=False), timeout=5)
         if self.verbose:
             print(f'[ble TX] {data.hex(" ")}')

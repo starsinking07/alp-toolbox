@@ -7,16 +7,36 @@
 import threading, time
 
 # RMS → 档位阈值 (16bit 归一化到 0..1)
+# ⚠️ 2026-10-21 主程序逆向: 官方的分档函数 (0x565F70) 用三个硬阈值 20 / 250 / 4000 切 4 档,
+#    **没有采样窗口、没有平滑、没有迟滞** —— 纯阶梯, 且设备只认 0..3 四个值。
+#    我们拿不到它输入值的量纲 (那个 int 由谁 emit 静态无解), 所以阈值仍是自定的;
+#    但官方的比值 1 : 12.5 : 200 说明它的第 3 档要到接近满幅才触发, 比我们的 1 : 6 : 25 陡得多。
+#    若用户觉得"跳变大/总是满档", 可以按这个比值把 TH_3 抬高 (例如 0.002 / 0.025 / 0.40)。
 TH_1, TH_2, TH_3 = 0.002, 0.012, 0.05
 PUSH_HZ = 4.9
 
+# 灵敏度预设 (2026-10-21): 给用户一个旋钮, 免得只能改代码。
+#   high   = 小声也亮 (阈值最低)
+#   medium = 现行默认 (与 0.1.8~0.1.14 行为一致)
+#   low    = 接近官方的陡峭度 (第 3 档要更响才触发)
+SENSITIVITY = {
+    'high':   (0.0015, 0.008, 0.030),
+    'medium': (TH_1, TH_2, TH_3),
+    'low':    (0.0040, 0.030, 0.120),
+}
 
-def _level_from_rms(rms: float) -> int:
-    if rms < TH_1:
+
+def thresholds_for(name: str):
+    return SENSITIVITY.get(str(name or 'medium').lower(), SENSITIVITY['medium'])
+
+
+def _level_from_rms(rms: float, th=(TH_1, TH_2, TH_3)) -> int:
+    t1, t2, t3 = th
+    if rms < t1:
         return 0
-    if rms < TH_2:
+    if rms < t2:
         return 1
-    if rms < TH_3:
+    if rms < t3:
         return 2
     return 3
 
@@ -24,9 +44,11 @@ def _level_from_rms(rms: float) -> int:
 class AudioLevelPusher:
     """采集 + 分档 + 定时回调 (level 0-3)。回调在独立线程执行, 须线程安全。"""
 
-    def __init__(self, level_cb, log=None):
+    def __init__(self, level_cb, log=None, sensitivity: str = 'medium'):
         self.level_cb = level_cb
         self.log = log or (lambda s: None)
+        self.sensitivity = str(sensitivity or 'medium').lower()
+        self._th = thresholds_for(self.sensitivity)
         self.available = True
         self._stop = threading.Event()
         self._t: threading.Thread | None = None
@@ -37,6 +59,13 @@ class AudioLevelPusher:
         self._stop.clear()
         self._t = threading.Thread(target=self._run, daemon=True)
         self._t.start()
+
+    def set_sensitivity(self, name: str):
+        """运行中切换灵敏度 (参数页改动立即生效, 不必重连/重启灯效)。"""
+        self.sensitivity = str(name or 'medium').lower()
+        self._th = thresholds_for(self.sensitivity)
+        self.log(f'[音频] 灵敏度 → {self.sensitivity} (阈值 {self._th[0]:.4f}/'
+                 f'{self._th[1]:.3f}/{self._th[2]:.3f})')
 
     def stop(self):
         self._stop.set()
@@ -77,7 +106,7 @@ class AudioLevelPusher:
                     continue
                 samples = _s.unpack(f'<{n}h', data[:n * 2])
                 rms = math.sqrt(sum(s * s for s in samples) / n) / 32768.0
-                level = _level_from_rms(rms)
+                level = _level_from_rms(rms, self._th)
                 now = time.time()
                 if level != cur_level or now - last_push >= 1.0 / PUSH_HZ:
                     cur_level = level

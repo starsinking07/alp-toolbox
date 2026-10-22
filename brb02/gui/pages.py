@@ -787,6 +787,11 @@ class CurvePage(QWidget):
             gear_idx = 1
         self.gear_btns[gear_idx].setChecked(True)
         gv.addLayout(gear_row)
+        # 转速校准信息行 (2026-10-22): 开了补偿才显示, 让"目标/下发/实测"三者可见
+        self.lbl_trim_info = QLabel('')
+        self.lbl_trim_info.setObjectName('RowDesc')
+        self.lbl_trim_info.setVisible(False)
+        gv.addWidget(self.lbl_trim_info)
         self.slider12 = GearSlider()
         self.slider12.levelSelected = self._level_selected
         self.slider12.set_level(gear_idx * 3 + 2)
@@ -1803,6 +1808,24 @@ class ControlPage(QWidget):
         self.cmb_light_mode.addItems([n for n, _ in self._light_modes])
         self.cmb_light_mode.currentIndexChanged.connect(self._light_apply)
         cv4.addWidget(_setting_row('灯效模式', '与官方全量一致; 音频同步=跟随系统声音, 响应=跟随按键', '✨', self.cmb_light_mode))
+        # 音频灵敏度 (2026-10-21): 设备只认 0~3 四档, 阈值决定"多响才升档"。
+        # 官方分档比值 1:12.5:200 比我们的陡得多, 所以给个旋钮让用户自己调。
+        self.cmb_audio_sens = QComboBox()
+        self.cmb_audio_sens.addItems(['高 (小声也亮)', '中 (默认)', '低 (更陡)'])
+        self.cmb_audio_sens.setCurrentIndex(
+            {'high': 0, 'medium': 1, 'low': 2}.get(
+                getattr(self.ctx.get('cfg'), 'audio_sens', 'medium'), 1))
+        self.cmb_audio_sens.currentIndexChanged.connect(self._audio_sens_changed)
+        cv4.addWidget(_setting_row('音频灵敏度', '音频同步模式的分档阈值; 觉得"总是满档"就往下调', '🔉', self.cmb_audio_sens))
+        # 转速校准 (2026-10-22): 设备实测比目标高 (低速 +300 / 高速 -100), 是压缩映射,
+        # 所以"固定偏移"只适合临时试, 长期用"自动校准"(用 0x06 实测闭环)。
+        self.cmb_trim = QComboBox()
+        self.cmb_trim.addItems(['关闭 (原始下发)', '固定偏移 -200', '自动校准 (闭环)'])
+        self.cmb_trim.setCurrentIndex(
+            {'off': 0, 'fixed': 1, 'loop': 2}.get(
+                getattr(self.ctx.get('cfg'), 'rpm_trim_mode', 'off'), 0))
+        self.cmb_trim.currentIndexChanged.connect(self._trim_mode_changed)
+        cv4.addWidget(_setting_row('转速校准', '实测比目标偏高时开启; 自动校准约 30 秒收敛', '🎯', self.cmb_trim))
         self.cmb_light_cm = QComboBox()
         self.cmb_light_cm.addItems(['单色', '彩色'])
         self.cmb_light_cm.currentIndexChanged.connect(self._light_apply)
@@ -2021,6 +2044,25 @@ class ControlPage(QWidget):
         """
         rpm = st.get('rpm', 0)
         self.lbl_speed.setText(f'{rpm} RPM' if rpm else '-- RPM')
+        self._update_trim_info(rpm)
+
+    def _update_trim_info(self, rpm: int):
+        """开了转速校准才显示: 目标 / 下发 / 实测 / 补偿量。"""
+        lbl = getattr(self, 'lbl_trim_info', None)
+        if lbl is None:
+            return
+        cfg = self.ctx.get('cfg')
+        mode = getattr(cfg, 'rpm_trim_mode', 'off')
+        if mode == 'off' or not rpm:
+            lbl.setVisible(False)
+            return
+        w = self.ctx.get('worker')
+        target = getattr(w, '_last_sent_rpm', None)
+        cmd = getattr(w, '_last_cmd_rpm', None)
+        trim = (cmd - target) if (cmd and target) else 0
+        lbl.setText(f'转速校准 ({mode}): 目标 {target or "--"} · 下发 {cmd or "--"} · '
+                    f'实测 {rpm} · 补偿 {trim:+d} RPM')
+        lbl.setVisible(True)
 
     def on_info(self, info: dict):
         """连接态 / 配置派生字段 (15s 周期 + 连接变化时立即触发)。实时转速见 on_status。"""
@@ -2042,6 +2084,23 @@ class ControlPage(QWidget):
         self.lbl_cpu_val.setText(f'{cpu:.0f}°C' if cpu else '--°C')
         self.lbl_gpu_val.setText(f'{gpu:.0f}°C' if gpu else '--°C')
         t = self.ctx['worker'].temps
+        # CPU 温度读不到时的提示 (2026-10-22): LHM 走内核驱动, 非管理员或驱动没装好就恒为 0。
+        # 用户只看到 "--°C" 会以为又是 bug (v0.1.12 修过一次同类投诉), 这里给出可操作的原因。
+        if not getattr(t, 'cpu_ok', True) and not getattr(self, '_cpu_hint_shown', False):
+            self._cpu_hint_shown = True
+            hint = ('CPU 温度读不到: 需要管理员权限, 或硬件驱动未就绪。\n'
+                    'GPU 温度不受影响; 风扇控制仍按曲线/固定转速正常执行。')
+            self.lbl_cpu_val.setToolTip(hint)
+            try:
+                from ..logbuf import LOGBUF
+                LOGBUF.write('[温度] CPU 传感器不可用 (cpu_ok=False) —— '
+                             '非管理员或驱动未就绪; 已提示用户')
+            except Exception:
+                pass
+        elif getattr(t, 'cpu_ok', False):
+            if getattr(self, '_cpu_hint_shown', False):
+                self.lbl_cpu_val.setToolTip('')
+                self._cpu_hint_shown = False
         cp, gp = t.cpu_power, t.gpu_power
         self.lbl_cpu_pow.setText(f'{cp:.0f} W' if cp and cp > 0 else '- W')
         self.lbl_gpu_pow.setText(f'{gp:.0f} W' if gp and gp > 0 else '- W')
@@ -2245,6 +2304,44 @@ class ControlPage(QWidget):
         self.lbl_swatch.setStyleSheet(f'background: rgb({r},{g},{b}); border-radius: 4px;')
         self.lbl_bri.setText(str(self.sld_bri.value()))
         self.lbl_spd.setText(f'{speed / 1000:.1f}s')
+
+    def showEvent(self, ev):
+        """页面级重读 (2026-10-21): 官方 29 个 mission 没有任何串联, 靠"页面打开时再查" ——
+        我们照此实现, 不做连接后的全量重放。节流 5s, 避免频繁切页把设备问爆。"""
+        super().showEvent(ev)
+        now = time.time()
+        if now - getattr(self, '_last_show_refresh', 0.0) < 5.0:
+            return
+        if getattr(self.ctx.get('main'), 'is_connected', False):
+            self._last_show_refresh = now
+            QTimer.singleShot(200, self._light_refresh_safe)
+
+    def _trim_mode_changed(self, idx: int):
+        """转速校准模式切换: 落配置 + 清补偿量并触发重发。"""
+        name = ('off', 'fixed', 'loop')[max(0, min(2, int(idx)))]
+        cfg = self.ctx.get('cfg')
+        if cfg is not None:
+            cfg.rpm_trim_mode = name
+            cfg.save()
+        w = self.ctx.get('worker')
+        if w is not None:
+            w._rpm_trim = 0
+            w._last_sent_rpm = None      # 让引擎按新模式立刻重发一次
+
+    def _audio_sens_changed(self, idx: int):
+        """音频灵敏度切换 (2026-10-21): 落配置 + 运行中的 0x15 推送器立即生效。"""
+        name = ('high', 'medium', 'low')[max(0, min(2, int(idx)))]
+        w = self.ctx.get('worker')
+        try:
+            if w is not None:
+                w.set_audio_sensitivity(name)
+            else:
+                cfg = self.ctx.get('cfg')
+                if cfg is not None:
+                    cfg.audio_sens = name
+                    cfg.save()
+        except Exception:
+            pass
 
     def _light_apply(self, *_):
         self._light_preview()

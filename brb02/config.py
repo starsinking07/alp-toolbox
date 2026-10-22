@@ -35,6 +35,15 @@ class Config:
     curve: list = field(default_factory=lambda: [list(x) for x in DEFAULT_CURVE])
     curve_source: str = 'auto'          # auto/cpu/gpu
     curve_hysteresis: int = 80
+    # ---- 转速补偿 (2026-10-21 真机标定) ----
+    # 设备实测转速比下发目标高约 +200 rpm (1400~2600 区间实测 +140~+250),
+    # 与保活周期无关 (0.4s/1.0s/4.0s 三组实测值逐项相同), 属设备端系统性偏移。
+    # off=不补偿 | fixed=固定偏移 | loop=用 0x06 实测值闭环微调
+    rpm_trim_mode: str = 'off'
+    rpm_trim_offset: int = -200         # fixed 模式的下发偏移 (负值 = 压低)
+    rpm_trim_limit: int = 400           # 补偿量绝对值上限 (fixed/loop 都受它约束)
+    # 音频同步灵敏度: high=小声也亮 / medium=默认 / low=接近官方陡峭度 (见 audio_sync.SENSITIVITY)
+    audio_sens: str = 'medium'
     # 曲线方案: {方案名: [[temp,rpm],...]}
     curve_profiles: dict = field(default_factory=dict)
     curve_active: str = '默认'
@@ -162,6 +171,12 @@ class Config:
         self.fixed_rpm = _clamp(self.fixed_rpm, 0, 4800, 1200)
         self.pre_curve_rpm = _clamp(self.pre_curve_rpm, 0, 4800, 0)
         self.autostart_minimized = bool(self.autostart_minimized)
+        if self.rpm_trim_mode not in ('off', 'fixed', 'loop'):
+            self.rpm_trim_mode = 'off'
+        self.rpm_trim_offset = _clamp(self.rpm_trim_offset, -400, 400, -200)
+        self.rpm_trim_limit = _clamp(self.rpm_trim_limit, 0, 800, 400)
+        if self.audio_sens not in ('high', 'medium', 'low'):
+            self.audio_sens = 'medium'
 
         def _san_curve(c):
             pts = []
