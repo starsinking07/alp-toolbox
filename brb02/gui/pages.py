@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 
-from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtCore import Qt, QTimer, QSize, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QIcon
 from PySide6.QtWidgets import QGraphicsOpacityEffect
 from PySide6.QtWidgets import (
@@ -24,6 +24,8 @@ from .curve_editor import CurveEditor, TEMPS, DEFAULT_PCT
 from brb02 import protocol
 from brb02.diagnostics import APP_VERSION
 from brb02.logbuf import LOGBUF
+from brb02.temps import (REASON_DRIVER, REASON_LHM, REASON_NO_ADMIN,
+                         REASON_NO_PAWNIO)
 from .theme import chart_color, temp_color
 from .widgets import FanIcon, SemiGauge, Toggle, make_card
 
@@ -39,6 +41,41 @@ GEAR_PRESET_KEYS = ['低噪', '平衡', '强效', '超频', '极限']
 
 def _card(title=None, hint=None):
     return make_card(title, hint)
+
+
+class _ClickLabel(QLabel):
+    """可点击的 QLabel —— 用于"CPU 温度读不到"横幅的修复入口。"""
+
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(ev)
+
+
+def _pawnio_setup_path() -> str | None:
+    """定位随包分发的 PawnIO 安装器 (打包资源 / 源码树 installer/pawnio)。"""
+    cands = []
+    base = getattr(sys, '_MEIPASS', None)
+    if base:
+        cands.append(os.path.join(base, 'assets', 'PawnIO_setup.exe'))
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    cands.append(os.path.join(root, 'installer', 'pawnio', 'PawnIO_setup.exe'))
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def _cpu_reason_text(reason: str | None) -> str:
+    """CPU 温度不可用的横幅文案: 说清"为什么"+"怎么办", 不写模糊的"驱动未就绪"。"""
+    return {
+        REASON_NO_ADMIN: 'CPU 温度需要管理员权限 —— 点此查看解决办法',
+        REASON_NO_PAWNIO: 'CPU 温度缺少 PawnIO 驱动 —— 点此一键安装',
+        REASON_DRIVER: 'PawnIO 驱动已安装但读不到传感器 —— 点此查看处理办法',
+        REASON_LHM: '温度模块加载失败 —— 点此查看日志排查',
+    }.get(reason or '', 'CPU 温度暂不可用 —— 点此查看原因')
 
 
 def _stat_tile(caption: str, sub: str | None = None):
@@ -1558,6 +1595,15 @@ class ControlPage(QWidget):
         dv.addLayout(dev_grid)
         grid.addWidget(dev_card, 0, 1)
         ovv.addLayout(grid)
+        # CPU 温度读不到时的可见横幅 (2026-10-22 用户反馈): 之前只有 tooltip,
+        # 用户只看到 "--°C" 不知道是权限/驱动问题, 这里直接摆出来并可一键处理。
+        self.banner_cpu = _ClickLabel('')
+        self.banner_cpu.setObjectName('WarnBanner')
+        self.banner_cpu.setWordWrap(True)
+        self.banner_cpu.setCursor(Qt.PointingHandCursor)
+        self.banner_cpu.setVisible(False)
+        self.banner_cpu.clicked.connect(self._fix_cpu_sensor)
+        v.addWidget(self.banner_cpu)
         v.addWidget(ov)
 
         # 分段页签
@@ -2084,23 +2130,42 @@ class ControlPage(QWidget):
         self.lbl_cpu_val.setText(f'{cpu:.0f}°C' if cpu else '--°C')
         self.lbl_gpu_val.setText(f'{gpu:.0f}°C' if gpu else '--°C')
         t = self.ctx['worker'].temps
-        # CPU 温度读不到时的提示 (2026-10-22): LHM 走内核驱动, 非管理员或驱动没装好就恒为 0。
-        # 用户只看到 "--°C" 会以为又是 bug (v0.1.12 修过一次同类投诉), 这里给出可操作的原因。
-        if not getattr(t, 'cpu_ok', True) and not getattr(self, '_cpu_hint_shown', False):
-            self._cpu_hint_shown = True
-            hint = ('CPU 温度读不到: 需要管理员权限, 或硬件驱动未就绪。\n'
-                    'GPU 温度不受影响; 风扇控制仍按曲线/固定转速正常执行。')
-            self.lbl_cpu_val.setToolTip(hint)
-            try:
-                from ..logbuf import LOGBUF
-                LOGBUF.write('[温度] CPU 传感器不可用 (cpu_ok=False) —— '
-                             '非管理员或驱动未就绪; 已提示用户')
-            except Exception:
-                pass
+        # CPU 温度读不到时的提示 (2026-10-22 二次反馈): 之前只写"非管理员或驱动未就绪",
+        # 用户明明用管理员运行、也装了 PawnIO 仍然 "--°C" —— 真因是 LHM 0.9.4 用的
+        # WinRing0 被系统黑名单拦截。现在按 temps.cpu_reason 给出确定原因。
+        ok = getattr(t, 'cpu_ok', True)
+        reason = getattr(t, 'cpu_reason', None)
+        if not ok:
+            # 温控源=CPU 且 CPU 温度读不到 ⇒ 控制引擎直接 return, 风扇会静默僵在最后转速。
+            # 这比"显示 --°C"更严重 (用户以为还在自动调节), 必须单独说清楚。
+            src_cpu = getattr(self.ctx['cfg'], 'curve_source', 'auto') == 'cpu'
+            if not getattr(self, '_cpu_hint_shown', False) or reason != getattr(self, '_cpu_reason', None):
+                self._cpu_hint_shown = True
+                self._cpu_reason = reason
+                self.lbl_cpu_val.setToolTip(
+                    'CPU 温度读不到: ' + _cpu_reason_text(reason).replace(' —— 点此', '') + '\n'
+                    + ('当前温控源是 CPU —— 风扇不会自动调节, 会停在最后一次转速。\n'
+                       if src_cpu else 'GPU 温度不受影响; 风扇控制仍按曲线/固定转速正常执行。'))
+                self.banner_cpu.setText(
+                    '⚠ CPU 温度读不到，且温控源是 CPU —— 风扇不会自动调节，点此处理'
+                    if src_cpu else '⚠ ' + _cpu_reason_text(reason))
+                self.banner_cpu.setVisible(True)
+                info = {}
+                try:
+                    info = t.driver_info()
+                except Exception:
+                    pass
+                LOGBUF.write(
+                    f'[温度] CPU 温度不可用: 原因={reason} | 温控源={"cpu" if src_cpu else "其他"} '
+                    f'| 管理员={info.get("isAdmin")} '
+                    f'| PawnIO={info.get("pawnioVersion")} | LHM={info.get("lhmVersion")}'
+                    + (f' | 错误={info.get("lhmError")}' if info.get('lhmError') else ''))
         elif getattr(t, 'cpu_ok', False):
             if getattr(self, '_cpu_hint_shown', False):
-                self.lbl_cpu_val.setToolTip('')
                 self._cpu_hint_shown = False
+                self._cpu_reason = None
+                self.lbl_cpu_val.setToolTip('')
+                self.banner_cpu.setVisible(False)
         cp, gp = t.cpu_power, t.gpu_power
         self.lbl_cpu_pow.setText(f'{cp:.0f} W' if cp and cp > 0 else '- W')
         self.lbl_gpu_pow.setText(f'{gp:.0f} W' if gp and gp > 0 else '- W')
@@ -2109,6 +2174,59 @@ class ControlPage(QWidget):
             self.lbl_cpu_model.setText(names.cpu_name)
         if names.gpu_name:
             self.lbl_gpu_model.setText(names.gpu_name)
+
+    def _fix_cpu_sensor(self):
+        """CPU 温度横幅的点击处理: 缺驱动就一键装, 缺权限就说清怎么提权。"""
+        from PySide6.QtWidgets import QMessageBox
+        t = self.ctx['worker'].temps
+        reason = getattr(t, 'cpu_reason', None)
+        # 温控源=CPU 时, 读不到温度等于失去自动调节 —— 修不好就先切回自动
+        tail = ('\n\n若暂时无法解决, 可到「曲线」页把温控源改为「自动」, '
+                '风扇会改用 GPU 温度继续自动调节。'
+                if getattr(self.ctx['cfg'], 'curve_source', 'auto') == 'cpu' else '')
+        if reason == REASON_NO_ADMIN:
+            QMessageBox.information(
+                self, 'CPU 温度需要管理员权限',
+                '请关闭工具箱, 右键「Alp工具箱.exe」→ 以管理员身份运行。\n\n'
+                '用安装包安装的版本会自动申请权限, 直接双击即可。\n'
+                '（未提权时 GPU 温度与风扇控制仍正常。）' + tail)
+            return
+        if reason == REASON_NO_PAWNIO:
+            exe = _pawnio_setup_path()
+            if not exe:
+                QMessageBox.warning(
+                    self, '缺少 PawnIO 驱动',
+                    '未找到随包的 PawnIO 安装器。\n'
+                    '请重新运行 Alp 工具箱安装包（会自动安装驱动）, '
+                    '或到 https://pawnio.eu 下载安装后重启工具箱。' + tail)
+                return
+            try:
+                import ctypes
+                if ctypes.windll.shell32.IsUserAnAdmin():
+                    subprocess.Popen([exe, '-install', '-silent'])
+                else:
+                    ctypes.windll.shell32.ShellExecuteW(
+                        None, 'runas', exe, '-install -silent', None, 1)
+            except Exception as e:
+                QMessageBox.warning(self, '安装失败', f'无法启动 PawnIO 安装器: {e}')
+                return
+            QMessageBox.information(
+                self, '正在安装 PawnIO 驱动',
+                '已开始静默安装 PawnIO 驱动（约 10 秒）。\n'
+                '安装完成后请重启工具箱, CPU 温度即可显示。' + tail)
+            return
+        if reason == REASON_DRIVER:
+            QMessageBox.information(
+                self, 'PawnIO 已安装但读不到温度',
+                '驱动在, 但传感器读数仍为空。请依次尝试:\n'
+                '1. 完全退出工具箱再重新打开（刚装完驱动必须重开才生效）\n'
+                '2. 仍然不行再重启电脑\n'
+                '3. 检查杀毒/安全软件是否拦截了 PawnIO\n'
+                '4. 「关于」页导出诊断包反馈给开发者')
+            return
+        QMessageBox.information(
+            self, '温度模块异常',
+            '温度读取模块加载失败。请到「关于」页查看日志, 或导出诊断包反馈。')
 
     def _dbg_send(self):
         result = self.ctx['worker'].debug_send(self.edit_dbg.text().strip())
@@ -2550,8 +2668,10 @@ class AboutPage(QWidget):
 
     _FAQS = (
         ('为什么 CPU 温度显示 "--" 或 0°C?',
-         'CPU 温度需要管理员权限 + PawnIO 驱动 (setup 版安装时已集成)。未提权时会自动降级显示 '
-         'GPU 温度; 装好驱动后重启工具箱即可。'),
+         'CPU 温度需要管理员权限 + PawnIO 驱动 (setup 版安装时已自动装好)。'
+         'v0.1.16 起若驱动缺失, 页面顶部会显示橙色提示条, 点一下即可安装, '
+         '装完重新打开工具箱生效 (无需重启电脑)。'
+         'GPU 温度不依赖驱动, 始终可用。'),
         ('找不到散热器 / 连不上?',
          '优先插 USB 线; 无线使用请长按设备按键 3-5 秒进入蓝牙配对模式, 两个通道会自动切换。'
          '官方装备箱运行时会独占设备, 请先完全退出官方软件。'),

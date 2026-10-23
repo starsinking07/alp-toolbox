@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import time
 import zipfile
 from dataclasses import asdict
 from datetime import datetime
 
-APP_VERSION = '0.1.15'
+APP_VERSION = '0.1.16'
 
 
 def export_diagnostics(cfg, worker, log_text: str, out_path: str) -> str:
@@ -19,6 +20,7 @@ def export_diagnostics(cfg, worker, log_text: str, out_path: str) -> str:
         'version': APP_VERSION,
         'generatedAt': datetime.now().astimezone().isoformat(timespec='seconds'),
         'os': 'windows',
+        'osBuild': f'{platform.release()} {platform.version()}',   # 驱动黑名单与系统版本强相关
         'installType': 'exe' if getattr(__import__('sys'), 'frozen', False) else 'source',
         'privacyNote': '文件含散热器蓝牙地址与设备曲线, 包含本机文件路径 (如上次选图路径与临时目录), '
                        '公开分享前请自行斟酌',
@@ -42,6 +44,12 @@ def export_diagnostics(cfg, worker, log_text: str, out_path: str) -> str:
         'cpuTemp': t.cpu, 'gpuTemp': t.gpu,
         'cpuPower': t.cpu_power, 'gpuPower': t.gpu_power,
         'cpuName': t.cpu_name, 'gpuName': t.gpu_name,
+        # 温度链路诊断 (v0.1.16): CPU 温度投诉曾因缺这几项无法定位
+        'isAdmin': getattr(t, 'is_admin', None),
+        'pawnioVersion': getattr(t, 'pawnio_version', None),
+        'lhmVersion': getattr(t, 'lhm_version', ''),
+        'cpuReason': getattr(t, 'cpu_reason', None),
+        'lhmError': getattr(t, 'lhm_error', '') or None,
         'historySamples': len(worker.history),
     }
     try:

@@ -3,7 +3,12 @@
 
 笔记本双显卡策略: 有 NVIDIA/AMD 独显时优先独显, 否则取核显;
 GPU 名字/温度/功耗都取选中的那块。
-无管理员权限时 AMD CPU 温度可能为 0, 自动降级用 GPU 温度。
+
+⚠️ 2026-10-22 (v0.1.16): LHM 0.9.4 → 0.9.6。
+0.9.4 用 WinRing0 内核驱动读 AMD SMU, 而 WinRing0x64.sys 已被微软列入
+"易受攻击驱动"黑名单, Win11 24H2+ 默认拦截 → CPU 温度/功耗恒为 0,
+GPU 走 NVAPI 不受影响 (用户反馈"CPU 温度不显示"的真因)。
+0.9.5 起 LHM 改用 PawnIO 驱动, 因此 **PawnIO 成为 CPU 温度的硬依赖**。
 """
 from __future__ import annotations
 
@@ -14,6 +19,34 @@ import time
 from typing import Optional
 
 LHM_DIR = ''   # 可选: 手动指定 LibreHardwareMonitorLib.dll 所在目录; 留空则按顺序自动搜索
+
+# CPU 温度不可用的原因 (供 UI 给出可操作提示 / 诊断包定位)
+REASON_OK = None
+REASON_NO_ADMIN = 'no_admin'          # 未提权
+REASON_NO_PAWNIO = 'no_pawnio'        # PawnIO 驱动未安装
+REASON_DRIVER = 'driver'              # 驱动已装但读不到 (被拦截 / 未生效)
+REASON_LHM = 'lhm_load'               # LHM 程序集加载失败
+
+
+def _is_admin() -> bool:
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _pawnio_version() -> str | None:
+    """PawnIO 已安装则返回版本号 (LHM 0.9.6 读 AMD SMU 必需)。"""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO') as k:
+            return str(winreg.QueryValueEx(k, 'DisplayVersion')[0])
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
 
 
 def _default_lhm_dir() -> str:
@@ -49,6 +82,12 @@ class TempReader:
         self.cpu_power: float | None = None    # W
         self.gpu_power: float | None = None    # W
         self.cpu_ok = False
+        # 诊断 (v0.1.16): CPU 温度读不到时给出确定原因, 不再用"非管理员或驱动未就绪"糊过去
+        self.cpu_reason: str | None = REASON_NO_ADMIN
+        self.is_admin = _is_admin()
+        self.pawnio_version = _pawnio_version()
+        self.lhm_version = ''
+        self.lhm_error = ''
         # 负载体 (0.1.8 参数页): CPU/GPU 负载% / 内存占用% / 磁盘活动%
         self.cpu_load: float | None = None
         self.gpu_load: float | None = None
@@ -60,6 +99,9 @@ class TempReader:
         self._lhm_dir = lhm_dir or _default_lhm_dir()
 
     def start(self):
+        # 幂等: 重复 start 会起两个 LHM 读者 (双倍 CPU 占用 + 双份驱动句柄)
+        if getattr(self, '_t', None) is not None and self._t.is_alive():
+            return
         self._t = threading.Thread(target=self._run, daemon=True)
         self._t.start()
 
@@ -69,6 +111,29 @@ class TempReader:
     def snapshot(self) -> tuple[float, float]:
         with self._lock:
             return self.cpu, self.gpu
+
+    def _cpu_fail_reason(self) -> str:
+        """CPU 温度读不到时, 判定到底卡在哪一层 (提权 / 驱动缺失 / 驱动被拦截)。
+
+        每秒重判一次, 用户中途装好 PawnIO 或改用管理员启动都能自动恢复。
+        """
+        self.is_admin = _is_admin()
+        if not self.is_admin:
+            return REASON_NO_ADMIN
+        self.pawnio_version = _pawnio_version()
+        return REASON_DRIVER if self.pawnio_version else REASON_NO_PAWNIO
+
+    def driver_info(self) -> dict:
+        """驱动层状态 (诊断包用): 一眼看出是权限、驱动还是程序集的问题。"""
+        with self._lock:
+            return {
+                'isAdmin': self.is_admin,
+                'pawnioVersion': self.pawnio_version,
+                'lhmVersion': self.lhm_version,
+                'cpuOk': self.cpu_ok,
+                'cpuReason': self.cpu_reason,
+                'lhmError': self.lhm_error or None,
+            }
 
     # ---- 内部 ----
     def _run(self):
@@ -82,11 +147,15 @@ class TempReader:
             except Exception as e:
                 with self._lock:
                     self.cpu_ok = False
+                    self.cpu_reason = REASON_LHM
+                    self.lhm_error = f'{type(e).__name__}: {e}'
                 LOGBUF.write(f'[temps] LibreHardwareMonitor 初始化失败: {e} (15s 后重试)')
                 if self._stop.wait(15.0):
                     return
 
     def _loop(self):
+        from .logbuf import LOGBUF
+        t_start = time.time()
         import clr
         try:
             os.add_dll_directory(self._lhm_dir)
@@ -96,6 +165,14 @@ class TempReader:
             sys.path.append(self._lhm_dir)
         clr.AddReference('LibreHardwareMonitorLib')
         from LibreHardwareMonitor import Hardware
+        t_clr = time.time() - t_start
+        try:                                  # 版本进诊断包, 便于确认驱动层能力
+            from System.Reflection import Assembly
+            self.lhm_version = str(Assembly.LoadFrom(
+                os.path.join(self._lhm_dir, 'LibreHardwareMonitorLib.dll')
+            ).GetName().Version)
+        except Exception:
+            self.lhm_version = '?'
 
         computer = Hardware.Computer()
         computer.IsCpuEnabled = True
@@ -105,7 +182,13 @@ class TempReader:
             computer.IsStorageEnabled = True
         except Exception:
             pass
+        t_open = time.time()
         computer.Open()
+        # 启动耗时可见化 (2026-10-23): 用户看到"--°C"时, 到底慢在 CLR 冷启动还是
+        # Open 里的硬件枚举, 看这一行日志即可判断, 不必再靠截图猜。
+        LOGBUF.write(f'[温度] LHM {self.lhm_version} 就绪: '
+                     f'CLR {t_clr:.1f}s + Open {time.time() - t_open:.1f}s '
+                     f'= 合计 {time.time() - t_start:.1f}s')
 
         while not self._stop.is_set():
             cpu = 0.0
@@ -159,6 +242,7 @@ class TempReader:
                 self.cpu, self.gpu = cpu, gpu
                 self.gpu_hotspot = gpu_hs
                 self.cpu_ok = cpu > 0
+                self.cpu_reason = REASON_OK if self.cpu_ok else self._cpu_fail_reason()
                 if cpu_name:
                     self.cpu_name = cpu_name
                 if gpu_name:

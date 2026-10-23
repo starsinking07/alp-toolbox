@@ -277,9 +277,9 @@ QProgressBar::chunk {{ background: {t['primary']}; border-radius: 4px; }}
 QLabel#HeroRpm {{ font-size: 30px; font-weight: 800; }}
 QLabel#Muted {{ color: {t['muted_fg']}; font-size: 12px; background: transparent; }}
 QLabel#WarnBanner {{
-    background: {t['tile']}; color: {t['muted_fg']};
-    border: 1px solid {t['border']}; border-radius: 14px; padding: 10px 16px;
-    font-size: 13px;
+    background: {t['chip_bg']}; color: {t['primary']};
+    border: 1px solid {t['chip_border']}; border-radius: 14px; padding: 10px 16px;
+    font-size: 13px; font-weight: 600;
 }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
 QScrollBar::handle:vertical {{ background: {t['border']}; border-radius: 5px; min-height: 30px; }}

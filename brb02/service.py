@@ -298,7 +298,25 @@ class DeviceWorker(QThread):
         except Exception:
             pass
 
+    def _push_temps(self):
+        """1Hz 把温度推给界面。
+
+        温度是**主机侧**数据, 与设备会话无关 —— 旧实现把 tempsChanged 放在 `_tick`
+        的设备轮询之后, 而 `_tick` 在"未连接/暂停/图传中"都会提前 return, 结果:
+          ① 启动后要等连接 + 首轮 poll_report 才显示温度 (实测 ~10s 都是 "--");
+          ② 风扇没连时界面永远 "--", 可主机温度其实读得到 (2026-10-23 实测确认)。
+        这里独立推送, 与设备状态解耦。
+        """
+        now = time.time()
+        if now - getattr(self, '_last_temp_emit', 0.0) < 0.9:
+            return
+        self._last_temp_emit = now
+        cpu_raw, gpu_raw = self.temps.snapshot()
+        self.tempsChanged.emit(self._spike_filtered(cpu_raw, 'cpu'),
+                               self._spike_filtered(gpu_raw, 'gpu'))
+
     def _tick(self, info_timer):
+        self._push_temps()          # 温度先行: 不依赖设备是否连上
         # 手动断开: 暂停轮询与重连
         if self._paused:
             self.msleep(300)
@@ -402,7 +420,7 @@ class DeviceWorker(QThread):
         # 影响"我看到的温度是多少"。
         cpu, gpu = self._spike_filtered(cpu_raw, 'cpu'), self._spike_filtered(gpu_raw, 'gpu')
         cpu_ctl, gpu_ctl = self._process_temp(cpu_raw, 'cpu'), self._process_temp(gpu_raw, 'gpu')
-        self.tempsChanged.emit(cpu, gpu)
+        # tempsChanged 已在 _tick 开头 1Hz 推送 (见 _push_temps), 这里不再重复发。
         self._temp_hist.append((time.time(), cpu or gpu or 0))
 
         rpm_now = st.get('rpm', self._last_sent_rpm or 0) if st else (self._last_sent_rpm or 0)

@@ -36,7 +36,6 @@ Python + PySide6,支持 **USB / 蓝牙 BLE 双通道**(自动切换),通信协�
 - **屏幕信息卡(默认开启)**:连接后自动上屏 CPU/GPU 型号 + 当日日期,每天自动更新,
   「恢复信息卡」随时切回;**情境卡片(可选)**:全屏游戏自动切游戏卡(前台进程名),
   CPU/GPU ≥85°C 自动推红色警报卡
-- **屏幕开关**:一键熄灭 / 点亮散热器屏幕(状态设备侧持久化,拔电不丢;写入后回读确认)
 - **工具箱优先**:散热器物理按钮换档会被工具箱按当前模式接管
   (智能变频=曲线目标, 手动=固定转速);手动转速渐进映射官方四档(低噪 → 平衡 → 强效 → 超频)
 - **托盘常驻**:点 ✕ 最小化到托盘,后台温控不停;重复启动自动唤醒已开窗口;开机自启动可静默驻留(不弹窗)
@@ -67,13 +66,14 @@ python main.py
 ```
 
 - 温度/功耗读取使用 `LHM/LibreHardwareMonitorLib.dll`(MPL-2.0,已随仓库附带),
-  程序会自动在打包资源、`LHM/` 目录下定位。
-- **CPU 温度**需要管理员权限 + [PawnIO](https://github.com/hirschmann/pawnio) 驱动;
-  无提权时自动降级显示 GPU 温度。
+  程序会自动在打包资源、`LHM/` 目录下定位。**该目录下所有 dll 必须一起分发**
+  (System.Memory / DiskInfoToolkit / BlackSharp.Core 等是 LHM 0.9.6 的托管依赖,
+  缺一个就会在 `Computer.Open()` 抛异常, 表现为 CPU 温度恒为 0)。
+- **CPU 温度需要管理员权限 + [PawnIO](https://github.com/hirschmann/pawnio) 驱动**(必装)。
+  LHM 0.9.5 起弃用 WinRing0(已被微软列入易受攻击驱动黑名单, Win11 24H2+ 会拦截),
+  改用 PawnIO 读 AMD SMU。安装包会自动静默安装 PawnIO; 便携版可在应用内横幅一键安装。
+  未提权或未装驱动时 CPU 温度显示 `--°C`, 并在页面顶部给出具体原因。
 - 打包:`pip install pyinstaller && pyinstaller --clean -y Alp.spec`
-- 离线自检(不碰设备,改动 GUI / 控制逻辑后建议跑一遍):
-  `python tests/check_ui_wiring.py`(UI 接线断言,需要 PySide6)与
-  `python tests/test_v018_features.py`(情景配置 + 温度墙引擎)
 
 ## 硬件协议
 
@@ -89,7 +89,7 @@ python main.py
 
 - Windows 10 / 11
 - 黑鲨风神 Pro(BRB02)散热器(USB 连接,或长按按键 3–5 秒进入蓝牙配对)
-- CPU 温度显示:管理员权限 + PawnIO 驱动(可选)
+- CPU 温度显示:管理员权限 + PawnIO 驱动(安装包自动安装; 便携版可在应用内一键安装)
 
 ## 免责声明
 
