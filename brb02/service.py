@@ -255,12 +255,19 @@ class DeviceWorker(QThread):
                         if ticks % 25 == 0:
                             self._ensure_host_control()
                         if (not self._uploading
+                                and not self.config.button_follow_enabled
                                 and self._last_sent_rpm is not None
                                 and self._last_tec_sent):
-                            # ⚠️ 跟随物理按键模式: 档位归设备 —— 必须用**设备当前档位**,
-                            # 不能用上次算出来的 (否则保活会把用户刚按的档位覆盖回去)。
-                            lvl = (self._dev_level() if self.config.button_follow_enabled
-                                   else self._last_tec_sent)
+                            # ⚠️ 2026-10-24 (用户实拍视频): **跟随物理按键模式下彻底停发 0x24 保活**。
+                            # 以前只是把档位换成"设备当前档位"再发, 但那解决不了本质问题 ——
+                            # 0x24 一落地就等于"主机重新设定档位+转速", 设备刚按下的按键状态被
+                            # 立刻覆盖; 而 `_dev_level()` 来自 0x25 轮询 (主循环 ~1s 一次),
+                            # 按键到轮询之间的窗口里发的还是**旧档位**, 于是"有概率切换成功、
+                            # 多数时候抽风"。
+                            # 现在: 跟随模式只在 `_gear_sync_tick` 检测到换档时下发一次该档配置,
+                            # 其余时间一个字节都不发, 设备自己管自己。
+                            # 走到这里必然不是跟随模式 (条件里已排除), 档位用主机自己的意图
+                            lvl = self._last_tec_sent
                             # ⚠️ 必须短等待: set_fixed_rpm 默认 wait_s=0.3, 而这里 0.4s 一轮,
                             # 0.3s 攥着设备锁 ⇒ 主循环 poll_report 抢不到锁, 0x06 上报被吞
                             # (2026-10-21 实测: 4s 窗口一个 0x06 都没收到)。
@@ -681,6 +688,18 @@ class DeviceWorker(QThread):
             # 物理按键控制模式: **档位归设备**, 这里只能原样回读的档位, 绝不按转速反推
             # (旧逻辑 `rpm>=3800→L4` 正是覆盖按键的根源)。
             level = self._dev_level()
+            # ⚠️ 2026-10-24 (用户实拍视频 "被一直下发数据覆盖"): 档位没对齐时**一律不发**。
+            # 场景: 用户按下 L2, 设备已是 L2, 但我们上次下发记的还是 L1 —— 此时若因为曲线
+            # 目标变化而发一帧 (新转速 + 旧档位), 等于把 L2 又改回 L1。
+            # 交给 `_gear_sync_tick` 先确认换档、算出该档配置, 之后 `_last_tec_sent` 与设备
+            # 档位对齐, 才允许继续下发。
+            # 0 = 尚未下发过 (初值), 不能拿它当"档位不一致"
+            if self._last_tec_sent and level != self._last_tec_sent:
+                return
+            # 档位信息不新鲜时也不发: 0x25 轮询约 1s 一次, 按键按下到下次轮询之间
+            # `_dev_level()` 还是旧值 —— 此时发帧 = 用旧档位覆盖刚按下的档位。
+            if now - getattr(self, '_last_0x25_poll', 0) > 2.0:
+                return
         elif self.config.tec_auto_enabled:
             level = self._tec_level
         elif rpm >= 3800:
@@ -692,7 +711,11 @@ class DeviceWorker(QThread):
         else:
             level = 1
         # 档位映射 (v3.35): 手动模式按转速渐进 L1→L4 (散热器屏 FAN LV 平滑跟随)
-        due = now - self._last_send_ts > 5.0
+        # 5s 周期重发: 普通模式用来防止目标被设备夺回。
+        # ⚠️ 跟随物理按键模式下必须关掉 —— 周期性 0x24 会把设备刚按下的档位覆盖回去
+        # (用户实拍视频: "用物理按钮切换时会被一直下发数据覆盖, 有概率才成功")。
+        # 跟随模式改为纯事件驱动: 只有 _gear_sync_tick 检测到换档才下发该档配置。
+        due = (not self.config.button_follow_enabled) and (now - self._last_send_ts > 5.0)
         # 停转 (rpm=0) 只在切换瞬间立即下发, 之后靠 due 5s 保活一次, 不再每 tick 重发 (审计 G1)
         stop_now = rpm == 0 and self._last_sent_rpm != 0
         # 「改主意」= 目标/档位真的变了 (区别于 due 的周期性重发)
@@ -885,6 +908,24 @@ class DeviceWorker(QThread):
         LOGBUF.write(f'[按键] 固定转速已写入设备档位槽: {ok}/{len(levels)} 档'
                      + (f'（{skipped} 档为智能变频, 由主机实时驱动, 未写设备）' if skipped else '')
                      + ('；不开工具箱设备也能保持' if ok else ''))
+        # ⚠️ 2026-10-24: 写槽用的是**带 level 的 0x24**, 每写一档就把设备切到那一档。
+        # 写完全 4 档后设备会停在 L4 —— 用户只是改了个配置, 档位却被改掉了。
+        # 这里把设备恢复到当前档位 (跟随模式下尤其重要: 档位归设备, 不能被写槽带跑)。
+        if ok:
+            try:
+                cur = self._dev_level()
+                prof = self._button_profile(cur)
+                if prof.get('mode') == 'curve':
+                    self._last_sent_rpm = None      # 交给引擎按该档曲线重发
+                else:
+                    self._push_fixed(int(prof.get('rpm') or 0), cur, src=src)
+                    self._last_sent_rpm = int(prof.get('rpm') or 0)
+                    self._last_tec_sent = cur
+                    self._last_host_0x24_ts = time.time()
+                LOGBUF.write(f'[按键] 写槽后已恢复到当前档位 L{cur}')
+            except Exception as e:
+                self._last_sent_rpm = None
+                LOGBUF.write(f'[按键] 写槽后恢复档位失败 (交引擎重发): {e}')
         return ok
 
     def read_device_button_profiles(self) -> int:
@@ -1377,8 +1418,12 @@ class DeviceWorker(QThread):
         self._last_dev_level, self._last_dev_rpm = lvl, rpm
         if not changed:
             return
-        if now - self._last_host_0x24_ts < 6:
-            return                               # 主机刚发过 0x24 → 自己的回声
+        # 回声窗口: 主机刚发过 0x24, 设备可能还没生效, 这期间读到的差异不算按键。
+        # ⚠️ 2026-10-24: 原来是 6 秒 —— 太长了。按键换档会被压住 6 秒才被发现, 而这 6 秒里
+        # 引擎按曲线算出的新转速照发、档位却还是旧的 ⇒ 直接把用户按下的档位覆盖回去
+        # (用户实拍视频: "有概率会切换成功")。1.5s 足够吸收 USB 往返 + 设备生效延迟。
+        if now - self._last_host_0x24_ts < 1.5:
+            return
         # 物理按钮换档 → 清空下发记忆, 引擎下一 tick 立即生效
         from .logbuf import LOGBUF
         self._last_sent_rpm = None
