@@ -1148,18 +1148,21 @@ class DeviceWorker(QThread):
 
         base_ms = 4.0 if path.lower().endswith('.bin') else None   # 历史画布 = 预验证, 走 4ms 快传
 
-        def _once(flow=None):
-            """上传一次。flow=None → 用配置的「稳定模式」(upload_stable);
-            True → 强制 0xC6 流控 (首次失败后的回落重传用)。"""
-            use_flow = (bool(getattr(self.config, 'upload_stable', False))
-                        if flow is None else bool(flow))
+        def _once(slow=False):
+            """上传一次 —— **固定节拍模式**。
+
+            2026-10-24 实机定案: 0xC6 流控模式在本设备上不可用。设备会在传到任意位置
+            (实测 333/948/953/992/1077/1376 块) 突然停止回 C6, 而流控必须等 C6 才能发
+            下一块 ⇒ 每次都在半途死等, 一次都没成功过。节拍模式不等应答, 同一台机器上
+            连续 3 次成功 (19~21s/张)。⇒ 删除「稳定模式」, 一律节拍。
+            slow=True: 失败重传用, 拉长块间隔以降低 0x0C 级联概率 (不再切流控)。"""
             try:
                 return self.device.upload_image(
                     path, heartbeats=self._live_heartbeats(),
                     progress_cb=lambda s, t: self.uploadProgress.emit(s, t),
                     cancel_event=self._upload_cancel, flip_h=flip_h, flip_v=flip_v, fit=fit,
                     zoom=zoom, pan_x=pan_x, pan_y=pan_y,
-                    base_ms=base_ms, flow_control=use_flow)
+                    base_ms=(9.0 if slow else base_ms), flow_control=False)
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
@@ -1172,13 +1175,11 @@ class DeviceWorker(QThread):
             res = _once()
             # 整流重传兜底 (2026-10-06 诊断包案): 页边界 0x0C 级联失败后重传即愈
             # (8 次上传 4 败, 手动重传全部成功)。只重传 1 次防循环; 取消/握手失败不重传。
-            # ⚠️ 2026-10-11: 重传时**切到 0xC6 流控模式** (每包等设备流控帧, ~34s 但永不
-            # 0x0C) —— 这正是 v0.1.8 发布说明承诺的"失败重传自动回落流控", 此前
-            # flow_control 参数根本没人传 ⇒ 该路径不可达, 承诺未兑现。
+            # 2026-10-24: 重传不再切 0xC6 流控 (该模式在本设备必卡死), 改为**放慢节拍**。
             if not res.get('ok') and not res.get('canceled') and res.get('c6_bad', 0) > 0:
                 LOGBUF.write(f'[屏幕] 首次上传失败 ({res.get("c6_bad", 0)} 非00) —— '
-                             f'自动重传一次 (切 0xC6 流控模式: 较慢但更稳)')
-                res = _once(flow=True)
+                             f'自动重传一次 (节拍放慢到 9ms/块)')
+                res = _once(slow=True)
         finally:
             self._uploading = False
             self._upload_cancel.clear()
@@ -1396,11 +1397,9 @@ class DeviceWorker(QThread):
         LOGBUF.write(f'[屏幕] 自动上屏: {key}')
         self._uploading = True
 
-        def _once(flow=None):
-            """上屏一次。flow=None → 用配置的「稳定模式」(upload_stable);
-            True → 强制 0xC6 流控 (首次失败后的回落重传用)。"""
-            use_flow = (bool(getattr(self.config, 'upload_stable', False))
-                        if flow is None else bool(flow))
+        def _once(slow=False):
+            """上屏一次 —— **固定节拍模式** (0xC6 流控已废, 见 _run_image_upload 的说明)。
+            slow=True: 失败重传用, 7ms → 9ms/块。"""
             try:
                 if kind == 'info':
                     img = sc.render_card(
@@ -1426,7 +1425,8 @@ class DeviceWorker(QThread):
                 return self.device.upload_canvas(
                     data, heartbeats=self._live_heartbeats(),
                     progress_cb=lambda s, t: self.uploadProgress.emit(s, t),
-                    cancel_event=self._screen_cancel, base_ms=7.0, flow_control=use_flow)
+                    cancel_event=self._screen_cancel,
+                    base_ms=(9.0 if slow else 7.0), flow_control=False)
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
@@ -1436,21 +1436,14 @@ class DeviceWorker(QThread):
 
         try:
             res = _once()
-            # 整流重传兜底 (同 _run_image_upload, 2026-10-06 案): 级联非00 重传即愈
-            # ⚠️ 2026-10-11: 重传切 0xC6 流控模式 (较慢但永不 0x0C) —— 兑现 v0.1.8 承诺的
-            # "失败重传自动回落流控" (此前 flow_control 无人传, 该路径不可达)。
+            # 失败重传兜底: 只重传 1 次防循环; 取消/握手失败不重传。
+            # 2026-10-24: 不再切 0xC6 流控 (该模式在本设备必卡死), 改为放慢节拍重传。
             if not res.get('ok') and not res.get('canceled'):
                 reason = res.get('reason') or ''
-                if '流控中断' in reason:
-                    # 2026-10-23 实机: 流控模式在设备中途停回 C6 时会卡在半张图
-                    # (两次 948/1077 块, 均 ~8s 后停)。节拍模式不等 C6, 仍可能写完整张图 ——
-                    # 换模式再试一次, 比直接失败有用得多。
-                    LOGBUF.write('[屏幕] 流控中断 —— 回退节拍模式重传一次')
-                    res = _once(flow=False)
-                elif res.get('c6_bad', 0) > 0:
-                    LOGBUF.write(f'[屏幕] 首次上屏失败 ({res.get("c6_bad", 0)} 非00) —— '
-                                 f'自动重传一次 (切 0xC6 流控模式)')
-                    res = _once(flow=True)
+                if 'C4 握手失败' not in reason:
+                    LOGBUF.write(f'[屏幕] 首次上屏失败 ({reason}) —— '
+                                 f'自动重传一次 (节拍放慢到 9ms/块)')
+                    res = _once(slow=True)
         finally:
             self._uploading = False
             self._screen_cancel.clear()   # 取消意图已消化, 不残留给下次自动上屏 (否则恢复卡永久秒取消)
