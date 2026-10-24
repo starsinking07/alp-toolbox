@@ -9,6 +9,14 @@ from typing import Optional
 from . import protocol
 from .transport_usb import TransportUSB, find_device
 
+# ---- 屏幕上传的时限 (2026-10-23 v0.1.17) ----
+# 事故: 开「稳定模式」(0xC6 流控) 上屏时设备中途不再回 C6, 而流控分支每块最多等 10s 且
+# 没有总时限 ⇒ 剩余上千块 × 10s = 数小时, 主循环被独占 (status_ts 停在 109s 前),
+# 屏幕卡在半张图。以下三个常量给上传兜底; 提成常量是为了测试能把阈值压到毫秒级。
+UPLOAD_DEADLINE_S = 180.0     # 整次上传封顶 (正常 17s 节拍 / 34s 流控)
+FC_WAIT_S = 10.0              # 流控: 单块等 C6 的上限
+FC_STALL_LIMIT = 3            # 流控: 连续这么多块没等到 C6 ⇒ 判设备失联, 立即中止
+
 
 def _flip_canvas(data: bytes, w: int, h: int, flip_h: bool, flip_v: bool) -> bytes:
     """RGB565 大端画布的 水平/垂直 翻转 (设备方向标定用)。
@@ -552,10 +560,27 @@ class Brb02Device:
             last_w = 0.0
             n_data = 0                        # 进度只数 A4 数据帧 (审计 G22)
             pauses = set(su.page_pause_after())   # 块 k 之后有 40ms 页停顿 (29 处)
+            # ⚠️ 2026-10-23 (v0.1.17): 整体超时 + 流控失联中止。
+            # 事故: 用户开「稳定模式」(upload_stable=True) 自动上屏 alarm 卡, 设备中途不再回
+            # C6, 而流控分支每块最多等 10s 且**没有总时限** ⇒ 剩余上千块 × 10s = 数小时,
+            # 主循环被独占 (statusAge 109s 不再上报), 屏幕停在半张图 (上半红卡, 下半旧白底)。
+            # 两道闸: 连续 3 块收不到 C6 即判定失联; 整次上传 180s 封顶 (正常 17s/34s)。
+            fc_stall = 0
+            upload_deadline = t0 + UPLOAD_DEADLINE_S
+
+            def _c6_count() -> int:
+                """已收到的 C6 条数 —— 中止路径也要带上, 否则日志显示 "C6=0" 会误导排查
+                (v0.1.17 实测: 设备其实回了 948/1077 条才停, 报告却写 0)。"""
+                return sum(1 for e in acks if e[1] == 0xC6)
             for n, fr in enumerate(frames[1:], 1):
                 if cancel_event is not None and cancel_event.is_set():
                     canceled = True
                     break
+                if time.time() > upload_deadline:
+                    return self._upload_fail(
+                        f'上传超时 (>{UPLOAD_DEADLINE_S:.0f}s, 已发 {sent}/{data_total})',
+                        c4_ack_ms=c4_ack_ms, c6_total=_c6_count(),
+                        elapsed_ms=(time.time() - t0) * 1000.0, sent=sent)
                 delta = ack_t + (fr.at_ms - base) / 1000.0 - time.time()
                 if delta > 0:
                     time.sleep(delta)
@@ -568,7 +593,7 @@ class Brb02Device:
                     # 0xC6 流控模式 (PIut02 实践): 每包等待设备主动回的流控帧再发
                     # 下一包, 节奏完全顺应设备 (页刷写/消化慢时自然等待) —— 永不 0x0C。
                     # 代价: 总时长 ~34s (节拍式 ~16.8s)。
-                    fc_deadline = time.time() + 10.0
+                    fc_deadline = time.time() + FC_WAIT_S
                     while c6n[0] < n - 1 and time.time() < fc_deadline:
                         if cancel_event is not None and cancel_event.is_set():
                             canceled = True
@@ -576,6 +601,20 @@ class Brb02Device:
                         time.sleep(0.002)
                     if canceled:
                         break
+                    if c6n[0] < n - 1:          # 本块没等到 C6 → 设备可能已失联
+                        fc_stall += 1
+                        if fc_stall >= FC_STALL_LIMIT:
+                            # 现场特征: 设备收下 C4 后能连回上千条 C6, 到半张图突然停
+                            # (两次实测 948/1077 块, 均 ~38s = 发送 8s + 3×10s 等待)。
+                            # 多半是设备端接收缓冲/刷写卡住 —— 拔插 USB 可复位。
+                            return self._upload_fail(
+                                f'流控中断: 连续 {fc_stall} 块未收到设备 C6 应答, 已中止 '
+                                f'(已发 {sent}/{data_total}, 收到 C6 {_c6_count()} 条)。'
+                                f'若反复停在同一位置, 请拔插 USB 后重试',
+                                c4_ack_ms=c4_ack_ms, c6_total=_c6_count(),
+                                elapsed_ms=(time.time() - t0) * 1000.0, sent=sent)
+                    else:
+                        fc_stall = 0
                 elif (n - 1) in pauses:
                     # 页首块门控 (2026-10-06 诊断包案): 级联失败的首拒块全部精确落在
                     # 页边界首块 (#1201×3 / #354×1, 与 v3.23 案签名相同 —— 当年判

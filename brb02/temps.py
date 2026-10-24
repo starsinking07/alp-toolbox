@@ -22,6 +22,7 @@ LHM_DIR = ''   # 可选: 手动指定 LibreHardwareMonitorLib.dll 所在目录; 
 
 # CPU 温度不可用的原因 (供 UI 给出可操作提示 / 诊断包定位)
 REASON_OK = None
+REASON_INIT = 'init'                  # 尚未完成首轮扫描 (占位, 不应据此报错)
 REASON_NO_ADMIN = 'no_admin'          # 未提权
 REASON_NO_PAWNIO = 'no_pawnio'        # PawnIO 驱动未安装
 REASON_DRIVER = 'driver'              # 驱动已装但读不到 (被拦截 / 未生效)
@@ -83,7 +84,9 @@ class TempReader:
         self.gpu_power: float | None = None    # W
         self.cpu_ok = False
         # 诊断 (v0.1.16): CPU 温度读不到时给出确定原因, 不再用"非管理员或驱动未就绪"糊过去
-        self.cpu_reason: str | None = REASON_NO_ADMIN
+        # ⚠️ 初值必须是 init 而不是 no_admin —— 首轮扫描前就报 no_admin 会误导排查
+        # (v0.1.16 实机日志出现过"管理员=True | 原因=no_admin"的自相矛盾行)。
+        self.cpu_reason: str | None = REASON_INIT
         self.is_admin = _is_admin()
         self.pawnio_version = _pawnio_version()
         self.lhm_version = ''

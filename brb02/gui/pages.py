@@ -24,7 +24,7 @@ from .curve_editor import CurveEditor, TEMPS, DEFAULT_PCT
 from brb02 import protocol
 from brb02.diagnostics import APP_VERSION
 from brb02.logbuf import LOGBUF
-from brb02.temps import (REASON_DRIVER, REASON_LHM, REASON_NO_ADMIN,
+from brb02.temps import (REASON_DRIVER, REASON_INIT, REASON_LHM, REASON_NO_ADMIN,
                          REASON_NO_PAWNIO)
 from .theme import chart_color, temp_color
 from .widgets import FanIcon, SemiGauge, Toggle, make_card
@@ -2135,7 +2135,8 @@ class ControlPage(QWidget):
         # WinRing0 被系统黑名单拦截。现在按 temps.cpu_reason 给出确定原因。
         ok = getattr(t, 'cpu_ok', True)
         reason = getattr(t, 'cpu_reason', None)
-        if not ok:
+        # init = 首轮扫描未完成, 此时报任何原因都是猜的 (v0.1.16 曾误报 no_admin)
+        if not ok and reason != REASON_INIT:
             # 温控源=CPU 且 CPU 温度读不到 ⇒ 控制引擎直接 return, 风扇会静默僵在最后转速。
             # 这比"显示 --°C"更严重 (用户以为还在自动调节), 必须单独说清楚。
             src_cpu = getattr(self.ctx['cfg'], 'curve_source', 'auto') == 'cpu'

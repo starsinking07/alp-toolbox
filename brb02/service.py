@@ -1439,10 +1439,18 @@ class DeviceWorker(QThread):
             # 整流重传兜底 (同 _run_image_upload, 2026-10-06 案): 级联非00 重传即愈
             # ⚠️ 2026-10-11: 重传切 0xC6 流控模式 (较慢但永不 0x0C) —— 兑现 v0.1.8 承诺的
             # "失败重传自动回落流控" (此前 flow_control 无人传, 该路径不可达)。
-            if not res.get('ok') and not res.get('canceled') and res.get('c6_bad', 0) > 0:
-                LOGBUF.write(f'[屏幕] 首次上屏失败 ({res.get("c6_bad", 0)} 非00) —— '
-                             f'自动重传一次 (切 0xC6 流控模式)')
-                res = _once(flow=True)
+            if not res.get('ok') and not res.get('canceled'):
+                reason = res.get('reason') or ''
+                if '流控中断' in reason:
+                    # 2026-10-23 实机: 流控模式在设备中途停回 C6 时会卡在半张图
+                    # (两次 948/1077 块, 均 ~8s 后停)。节拍模式不等 C6, 仍可能写完整张图 ——
+                    # 换模式再试一次, 比直接失败有用得多。
+                    LOGBUF.write('[屏幕] 流控中断 —— 回退节拍模式重传一次')
+                    res = _once(flow=False)
+                elif res.get('c6_bad', 0) > 0:
+                    LOGBUF.write(f'[屏幕] 首次上屏失败 ({res.get("c6_bad", 0)} 非00) —— '
+                                 f'自动重传一次 (切 0xC6 流控模式)')
+                    res = _once(flow=True)
         finally:
             self._uploading = False
             self._screen_cancel.clear()   # 取消意图已消化, 不残留给下次自动上屏 (否则恢复卡永久秒取消)
