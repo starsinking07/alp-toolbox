@@ -248,10 +248,12 @@ class DeviceWorker(QThread):
             while not self._stop:
                 try:
                     if self.device.connected:
-                        # 每 ~10s 重申一次控制源=01 (主机托管): 官方开场只发一次, 但实测
-                        # 设备在部分路径 (屏操作/重连) 后会回落到自控, 重申一次即可复位。
+                        # 每 ~10s 复核一次控制源=01 (主机托管): 官方开场只发一次, 但实测
+                        # 设备在部分路径 (屏操作/重连) 后会回落到自控。
+                        # 2026-10-24: 改为**先读 0x23 再决定** —— 旧实现是无条件盲发 0x22,
+                        # 既不知道有没有掉控制, 又每 10s 多一次写操作。
                         if ticks % 25 == 0:
-                            self.device.mark_host_control()
+                            self._ensure_host_control()
                         if (not self._uploading
                                 and self._last_sent_rpm is not None
                                 and self._last_tec_sent):
@@ -265,8 +267,11 @@ class DeviceWorker(QThread):
                             self._push_fixed(self._last_sent_rpm, lvl,
                                              src=getattr(self, '_cooling_src', None),
                                              wait_s=0.05, max_rx=1)
-                            # 与正常下发一样记账: 免得档位同步把主机自己的 0x24 误判成"设备换档"
-                            self._last_host_0x24_ts = time.time()
+                            # ⚠️ 2026-10-24: 这里**不能**写 _last_host_0x24_ts。
+                            # 保活是 0.4s 周期的**重发**, 不是"改主意"; 写了会让
+                            # `_gear_sync_tick` 的回声闸 (`now - ts < 6`) 永久为真,
+                            # 物理按键换档就再也检测不到了 (用户反馈"切换不了了")。
+                            # 回声由 _gear_sync_tick 里的 same_as_sent 兜住。
                 except Exception:
                     pass
                 ticks += 1
@@ -297,6 +302,21 @@ class DeviceWorker(QThread):
             self.device.disconnect()
         except Exception:
             pass
+
+    def _ensure_host_control(self):
+        """控制源复核 (2026-10-24): 读 0x23 判断是否还在主机托管, 只有掉回自控才重申。
+
+        旧实现每 10s **无条件盲发** 0x22=01 —— 既不知道控制权有没有被夺回, 又白白多一次
+        写操作。0x23 是 0x22 的读回对 (真机判决实验: 0x22=01→0x23=1, =00→0x23=0, 改回→1)。
+        读失败 (设备忙/瞬断) 时保守照发, 不能因为读不到就不管。
+        """
+        src = self.device.get_cooling_source()
+        if src == 1:
+            return                                  # 仍由主机托管, 什么都不用做
+        self.device.mark_host_control()
+        if src == 0:
+            from .logbuf import LOGBUF
+            LOGBUF.write('[连接] 控制源被设备夺回 (0x23=0), 已重新声明主机托管')
 
     def _push_temps(self):
         """1Hz 把温度推给界面。
@@ -675,11 +695,18 @@ class DeviceWorker(QThread):
         due = now - self._last_send_ts > 5.0
         # 停转 (rpm=0) 只在切换瞬间立即下发, 之后靠 due 5s 保活一次, 不再每 tick 重发 (审计 G1)
         stop_now = rpm == 0 and self._last_sent_rpm != 0
-        if self._last_sent_rpm is None or stop_now or \
-           abs(rpm - self._last_sent_rpm) >= hyst or due or \
-           (self.config.tec_auto_enabled and level != self._last_tec_sent):
+        # 「改主意」= 目标/档位真的变了 (区别于 due 的周期性重发)
+        # ⚠️ 2026-10-24: 回声时间戳只能在这里置位。旧实现连**周期重发**也记账, 而 0x24 保活
+        # 每 0.4s 一轮 ⇒ `_last_host_0x24_ts` 永远是新的, `_gear_sync_tick` 的
+        # `now - ts < 6` 回声闸永久为真 ⇒ **物理按键换档从此再没被检测到**
+        # (用户反馈"切换不了了/抽风"; 日志里只剩启动时那一次 L1, 之后 7 分钟空白)。
+        intent_changed = (self._last_sent_rpm is None or stop_now
+                          or abs(rpm - self._last_sent_rpm) >= hyst
+                          or (self.config.tec_auto_enabled and level != self._last_tec_sent))
+        if intent_changed or due:
             self._push_fixed(rpm, level, src=getattr(self, '_cooling_src', None))
-            self._last_host_0x24_ts = time.time()   # 主机 0x24 (区分设备按钮变更)
+            if intent_changed:
+                self._last_host_0x24_ts = time.time()   # 主机"改主意"才记账 (区分设备按钮)
             self._last_sent_rpm = rpm
             self._last_send_ts = now
             self._last_tec_sent = level

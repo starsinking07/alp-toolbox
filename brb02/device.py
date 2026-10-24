@@ -204,6 +204,22 @@ class Brb02Device:
         except Exception:
             pass
 
+    def get_cooling_source(self) -> Optional[int]:
+        """0x23 读当前制冷控制源 (0=设备自控 / 1=主机托管), 读不到返回 None。
+
+        ⚠️ 用短等待 (0.05s / 1 帧): 调用方是 0.4s 保活线程, 长等待会攥着设备锁
+        把主循环的 poll_report 挤掉 (v0.1.15 修过的老坑)。
+        """
+        try:
+            got = self._send(protocol.build_frame(protocol.Cmd.GET_COOLING_SOURCE),
+                             wait_s=0.05, max_rx=1)
+        except Exception:
+            return None
+        for c, data in got:
+            if c == protocol.Cmd.GET_COOLING_SOURCE and data:
+                return data[0]
+        return None
+
     def get_cur_cooling(self) -> Optional[dict]:
         rxs = self._send(protocol.get_cur_cooling())
         for cmd, data in rxs:

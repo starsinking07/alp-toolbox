@@ -69,6 +69,10 @@ class Cmd:
     ENTER_BOOT_MODE        = 0x05   # ✓ [A5][03][05][CK] 短形态即触发 (盲扫实锤, 见 enter_boot_mode)
     GET_FIRMWARE_STRING    = 0x01   # ✓ [A5][03][01][A9] -> 完整版本串
     GET_LCD_SHOW_POS       = 0xC3   # ✓ 参数页布局读回 (0xC2 的读回对, 应答 15B; 固件 FUN_1b496)
+    SET_RGB_SWITCH         = 0x10   # ✓ 灯环总开关 (1字节 on/off; 2026-10-24 实证: 写 0/1 后
+                                    #    0x11 回读同步变化)。service.set_rgb 早就在手写这条, 此处归位
+    GET_COOLING_SOURCE     = 0x23   # ✓ 读制冷控制源 (0=设备自控 / 1=主机托管; 0x22 的读回对)。
+                                    #    2026-10-24 判决实验: 0x22=01→0x23=1, =00→0x23=0, 改回→1
 
 
 def checksum(body: bytes) -> int:
