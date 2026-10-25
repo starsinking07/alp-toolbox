@@ -112,17 +112,24 @@ def crc16_xmodem(data: bytes) -> int:
     return crc
 
 
-def meta_for(image_bytes: bytes, template: bytes = META_RED) -> bytes:
+def meta_for(image_bytes: bytes, template: bytes = META_RED,
+             ts: Optional[int] = None) -> bytes:
     """按画布重算 meta[4:8](=len) 与 meta[8:10](=crc16_XMODEM), 其余沿用 template。
 
-    ⚠️ meta[0] 公式仍未解, 只能沿用 template[0] (v22 已证设备忽略该字节)。
-    默认上传路径**无需**本函数 (恒用 META_RED); 仅在想要"字段自洽"的 meta 时使用。
+    meta[0:4] = Unix 时间戳 (官方拿它当落盘临时文件名), `ts` 给 None 时沿用模板值。
+    ⚠️ meta[0] 单独那一字节公式仍未解 (v22 已证设备忽略它)。
+
+    2026-10-25: 上传主路径**改为默认调用本函数** —— 此前恒发 META_RED, 等于无论传什么图
+    都告诉设备"这是那张红图"(size 恒 121552 对, 但 CRC 是别的图的), 设备里存的元数据
+    永远是旧的, 也就没法用 0xC5 回读校验 (FanControlPortable 2.9.0 正是按 size+CRC 校验)。
     """
     if len(image_bytes) != CANVAS_BYTES:
         raise ValueError(f'画布长度必须 {CANVAS_BYTES}, 实际 {len(image_bytes)}')
     if len(template) != 11:
         raise ValueError(f'模板必须 11B, 实际 {len(template)}')
     m = bytearray(template)
+    if ts is not None:
+        m[0:4] = (int(ts) & 0xFFFFFFFF).to_bytes(4, 'little')
     m[4:8] = len(image_bytes).to_bytes(4, 'little')
     m[8:10] = crc16_xmodem(image_bytes).to_bytes(2, 'little')
     return bytes(m)
@@ -362,7 +369,7 @@ def build_upload(image_bytes: bytes,
                  meta11: bytes = META_RED,
                  heartbeats: Optional[Iterable[bytes]] = None,
                  base_ms: float = BASE_MS) -> list[UploadFrame]:
-    """构建整条上传序列 (含时刻表), 返回 2114 帧。
+    """构建整条上传序列 (含时刻表), 返回 2115 帧。
 
     at_ms 相对 **C4 发送时刻**。执行器应: 发 C4 → 等真实 ACK → 以"首块落在
     ACK+4.2ms"重新锚定, 再按各帧相对偏移推进 (这样既尊重真实 ACK 时延,
@@ -371,6 +378,9 @@ def build_upload(image_bytes: bytes,
     heartbeats=None 时用 cap8 实录的 16 条心跳 (使本函数单独即可逐字节复刻 cap8);
     生产集成应传入自己的实时 0x07 帧。
     base_ms 默认 7.0 (官方节奏, 封版); 监控上屏传 4.0 (v3.18 压测定档)。
+
+    末尾的 0xC5 是**提交帧** (尾帧后 ~159ms): 让设备把图落盘。FanControlPortable
+    2.9.0 的 `blackSharkImageTailToCommitDelay = 165ms` 与之吻合。
     """
     blocks = build_blocks(image_bytes)
     tail = build_tail_block(image_bytes)

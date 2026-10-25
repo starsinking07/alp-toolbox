@@ -345,7 +345,7 @@ class Brb02Device:
     def _upload_fail(reason, **kw) -> dict:
         base = {'ok': False, 'reason': reason, 'c6_total': 0, 'c6_bad': 0,
                 'first_bad': None, 'status_hist': {}, 'c4_ack_ms': 0.0,
-                'elapsed_ms': 0.0, 'canceled': False, 'sent': 0}
+                'elapsed_ms': 0.0, 'canceled': False, 'sent': 0, 'verify': None}
         base.update(kw)
         return base
 
@@ -482,6 +482,42 @@ class Brb02Device:
                                   flip_v=flip_v, base_ms=base_ms,
                                   flow_control=flow_control)
 
+    def _verify_screen_image(self, canvas: bytes, retries: int = 5,
+                             gap: float = 0.25, initial: float = 1.2) -> dict:
+        """0xC5 读回屏保图像信息, 与本次画布比对 (size + CRC16-XMODEM)。
+
+        设备把主机经 0xC4 写进去的 11 字节元数据**原样回显**:
+        `[0:4] 时间戳 / [4:8] size u32le / [8:10] CRC16-XMODEM u16le`
+        (与 FanControlPortable 2.9.0 的 `screenimg.ParseInfo` 一致)。
+
+        这是"必要不充分"校验: 一致不证明写成功, 但**不一致就说明设备手上不是这张图**
+        —— 正好抓"C6 都说收了、屏幕却是旧图/半张图"这种情况。
+        需要重试: 提交帧刚发出, 设备可能还没把新元数据落好, 一次读到旧值是可能的;
+        而且实测 0xC5 应答本身就**不稳定** (2026-10-25: 5 次里 2 次不回, 只回 0x06/0x07),
+        所以重试 5 次、每次 0.25s 间隔。读不到 (got=None) 只记"无法校验", 不判失败。
+        """
+        from . import screen_upload as su
+        want_size = len(canvas)
+        want_crc = su.crc16_xmodem(canvas)
+        got = None
+        if initial > 0:
+            time.sleep(initial)          # 刚提交完设备在写 flash, 立刻问它一句多半不理
+        for i in range(max(1, retries)):
+            if i:
+                time.sleep(gap)
+            try:
+                rxs = self._send(protocol.build_frame(0xC5), wait_s=0.4, max_rx=3)
+            except Exception:
+                continue
+            for cmd, payload in rxs:
+                if cmd == 0xC5 and len(payload) >= 10:
+                    got = (int.from_bytes(payload[4:8], 'little'),
+                           int.from_bytes(payload[8:10], 'little'))
+                    if got == (want_size, want_crc):
+                        return {'ok': True, 'size': got[0], 'crc': got[1],
+                                'attempts': i + 1}
+        return {'ok': False, 'got': got, 'want': (want_size, want_crc)}
+
     def upload_canvas(self, canvas_bytes: bytes, heartbeats=None, progress_cb=None,
                       cancel_event=None, flip_h: bool = False, flip_v: bool = False,
                       base_ms: float | None = None,
@@ -509,12 +545,14 @@ class Brb02Device:
             data = _flip_canvas(data, su.CANVAS_W, su.CANVAS_H, flip_h, flip_v)
         try:
             frames = su.build_upload(data, heartbeats=heartbeats,
+                                     meta11=su.meta_for(data, ts=int(time.time())),
                                      base_ms=(su.BASE_MS if base_ms is None else base_ms))
         except Exception as e:
             return self._upload_fail(f'构建上传帧失败: {e}')
 
         total_all = len(frames) - 1                 # C4 之后的总帧数
         data_total = su.BLOCK_COUNT + 1             # 数据帧 (2095 块 + 尾帧) = 2096
+        verify = None                               # 0xC5 回读校验结果 (设备侧证据)
 
         t = self._t
         acks = []                                   # (t, cmd, status)
@@ -669,6 +707,11 @@ class Brb02Device:
             except Exception:
                 pass
 
+        # 传后校验 (2026-10-25): **必须放在读线程停掉之后** —— 上传期间那个读线程只收
+        # 20 字节的 C6 帧 (`rx[1]==0x05`), 0xC5 的应答只有 12 字节, 会被它直接过滤掉,
+        # 校验就永远"读不到设备图像信息"(实测踩过一次)。线程停了 `_send` 自己读, 正常。
+        verify = self._verify_screen_image(data) if sent else None
+
         c6 = [e for e in acks if e[1] == 0xC6]
         sts = [e[2] for e in c6]
         hist: dict = {}
@@ -685,8 +728,21 @@ class Brb02Device:
             reason = f'完成但有 {len(bad)} 个非 00 状态 (首个 C6#{bad[0]}={sts[bad[0]]:#04x})'
         else:
             ok, reason = True, f'成功 (C6 {len(sts)}×00)'
+        # 回读校验结果并入结论: C6 全 00 但设备手上的图不是这张 ⇒ 不能算成功
+        if ok and verify is not None:
+            if verify.get('ok'):
+                reason += f' · 回读校验 size={verify["size"]} crc={verify["crc"]:#06x} ✓'
+            else:
+                got, want = verify.get('got'), verify.get('want')
+                if got is None:
+                    reason += ' · 回读校验: 读不到设备图像信息'
+                else:
+                    ok = False
+                    reason += (f' · 回读校验不符: 设备存 size={got[0]} crc={got[1]:#06x}, '
+                               f'本次 size={want[0]} crc={want[1]:#06x}'
+                               f' (C6 已收全, 但设备未反映本次写入)')
         return {'ok': ok, 'reason': reason, 'c6_total': len(sts), 'c6_bad': len(bad),
                 'first_bad': first_bad, 'status_hist': hist, 'c4_ack_ms': c4_ack_ms,
                 'elapsed_ms': (time.time() - t0) * 1000.0, 'canceled': canceled,
-                'sent': sent}
+                'sent': sent, 'verify': verify}
 
