@@ -16,35 +16,41 @@ def _pen(color: str, width: float) -> QPen:
 
 
 LIGHT = {
-    'bg': '#eceff5',            # 窗口底 (比卡片深一档的灰)
-    'fg': '#16181d',
+    # 《UI复刻细节手册》§3.1 精确对表 (FanControl 亮色令牌原值)
+    'bg': '#f6f8fc',
+    'fg': '#111827',
     'card': '#ffffff',
-    'muted': '#f1f3f8', 'muted_fg': '#7a8494',
-    'border': '#e4e8ef',
+    'muted': '#edf2f9', 'muted_fg': '#66758a',
+    'border': '#e1e7f0',
+    'input': '#d3ddea',
     'primary': '#2f6df6', 'primary_fg': '#ffffff',
     'danger': '#dc2626',
-    'sidebar': '#ffffff',
+    'sidebar': '#ffffff', 'sidebar_border': '#e5ebf4', 'sidebar_accent': '#eef4ff',
     'hot': '#ef4444', 'warm': '#f97316', 'ok': '#10b981',
     'chip_bg': '#e8eefc', 'chip_border': '#d5e0fa',
     'shadow': '0 10px 30px -12px rgba(23,31,54,0.10), 0 2px 6px -2px rgba(23,31,54,0.05)',
     'shadow_soft': '0 4px 14px -6px rgba(23,31,54,0.08)',
     'tile': '#f5f7fb',
     'hover_line': '#c9d8fb',
+    'nav_indicator': '#cddcfd',   # primary@24% 混 sidebar (§2 滑块)
 }
 
 DARK = {
+    # §3.1 暗色令牌原值 (此前已基本一致, 补齐 input/sidebar 族)
     'bg': '#07090d', 'fg': '#eef2f7',
     'card': '#11161d', 'muted': '#1a2029', 'muted_fg': '#98a2b3',
     'border': '#232a35',
+    'input': '#2b3442',
     'primary': '#ff4b26', 'primary_fg': '#fff7f3',
     'danger': '#ef4444',
-    'sidebar': '#0a0d12',
+    'sidebar': '#0a0d12', 'sidebar_border': '#202631', 'sidebar_accent': '#171c24',
     'hot': '#ef4444', 'warm': '#fb923c', 'ok': '#34d399',
     'chip_bg': 'rgba(255,75,38,0.12)', 'chip_border': 'rgba(255,75,38,0.30)',
     'shadow': '0 12px 34px -14px rgba(0,0,0,0.65)',
     'shadow_soft': '0 4px 14px -6px rgba(0,0,0,0.5)',
     'tile': '#161c24',
     'hover_line': 'rgba(255,75,38,0.4)',
+    'nav_indicator': '#451c17',   # primary@24% 混 sidebar (§2 滑块)
 }
 
 CHART = {
@@ -101,6 +107,7 @@ QMainWindow, QWidget#AppShell {{
     background: {t['bg']}; color: {t['fg']};
     border-radius: 14px;
 }}
+QWidget#AppShellSquare {{ border-radius: 0; }}
 QWidget#ContentArea {{ background: transparent; }}
 QToolTip {{
     background: {t['card']}; color: {t['fg']}; border: 1px solid {t['border']};
@@ -115,11 +122,14 @@ QLabel#StatVal, QWidget#TitleBadge, QWidget#TitleBadgeActive, QLabel#HeroRpm {{
 /* ---- SpinBox: 隐藏原生上下箭头, 干净输入框 (对齐原版 NumberInput) ---- */
 
 
-/* ---- 卡片: 大圆角 + 柔和阴影 ---- */
+/* ---- 卡片: 大圆角 + 柔和阴影 ----
+   border 常态 1px 透明 + :hover 换色 —— 两侧同宽, hover 时不跳版 (QSS 无 transition,
+   "升起感"由 motion.attach_card_hover 的阴影动画补上, 边框色瞬切即可)。 */
 QFrame[card="true"] {{
-    background: {t['card']}; border: none;
+    background: {t['card']}; border: 1px solid transparent;
     border-radius: 22px;
 }}
+QFrame[card="true"]:hover {{ border-color: {t['hover_line']}; }}
 QLabel#CardTitle {{ font-size: 15px; font-weight: 700; color: {t['fg']}; background: transparent; }}
 QLabel#CardHint  {{ font-size: 12px; color: {t['muted_fg']}; background: transparent; }}
 QLabel#PageTitle {{ font-size: 24px; font-weight: 800; color: {t['fg']}; background: transparent; }}
@@ -143,9 +153,14 @@ QPushButton#WinBtn {{
 QPushButton#WinBtn:hover {{ background: {t['muted']}; color: {t['fg']}; }}
 QPushButton#WinBtnClose:hover {{ background: #ef4444; color: white; }}
 
-/* ---- 悬浮侧栏面板 (圆角 + 细边) ---- */
+/* ---- 悬浮侧栏舱 (§2: 圆角悬浮 dock; Qt 无 backdrop-filter, 用实底近似) ---- */
 QWidget#Sidebar {{
-    background: {t['sidebar']}; border: 1px solid {t['border']}; border-radius: 20px;
+    background: {t['sidebar']}; border: 1px solid {t['sidebar_border']}; border-radius: 20px;
+}}
+/* 选中滑块指示器 (§2: 独立绝对定位 pill, primary@24% 混 sidebar 底) */
+QWidget#NavIndicator {{
+    background: {t['nav_indicator']}; border-radius: 14px;
+    border-top: 1px solid rgba(255,255,255,0.10);
 }}
 QLabel#Brand {{
     color: {t['primary']}; font-size: 21px; font-weight: 800;
@@ -157,8 +172,11 @@ QPushButton#DockBtn {{
     padding: 0 14px; min-height: 48px;
 }}
 QPushButton#DockBtn:hover {{ background: {t['muted']}; color: {t['fg']}; }}
-QPushButton#DockBtn:checked {{
-    background: {t['chip_bg']}; color: {t['primary']}; font-weight: 700;
+/* 收起态: 按钮只有 44px 宽, 而 padding 0 14px + 图标 21px = 49px 已超宽, 加上
+   text-align:left 会把图标挤偏 (用户反馈"图标左右空白不对称")。收起态改成居中 + 零内边距。 */
+QPushButton#DockBtn[collapsed="true"] {{ text-align: center; padding: 0; }}
+QPushButton#DockBtn:checked, QPushButton#DockBtn:checked:hover {{
+    background: transparent; color: {t['primary']}; font-weight: 700;
 }}
 
 /* ---- 按钮 ---- */
@@ -188,7 +206,7 @@ QLabel#StatVal {{ font-size: 16px; font-weight: 700; color: {t['fg']}; }}
 QFrame#SettingRow {{
     background: {t['tile']}; border: none; border-radius: 16px;
 }}
-QFrame#SettingRow:hover {{ background: {t['muted']}; }}
+QFrame#SettingRow:hover {{ background: {t['muted']}; border-left: 2px solid {t['primary']}; }}
 QFrame#SettingRow QLabel {{ background: transparent; }}
 QLabel#RowTitle {{ font-size: 14px; font-weight: 600; color: {t['fg']}; background: transparent; }}
 QLabel#RowDesc {{ font-size: 12px; color: {t['muted_fg']}; background: transparent; }}

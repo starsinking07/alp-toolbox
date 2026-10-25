@@ -2,7 +2,9 @@
 """主窗口外壳: 悬浮圆角侧栏 + 自定义标题栏 + 页面切换 + 托盘 + 快捷键。"""
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, QTimer
+import os
+from PySide6.QtCore import (QAbstractAnimation, QPoint, QPropertyAnimation,
+                            QRect, QSize, Qt, QTimer, QVariantAnimation)
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton,
@@ -13,13 +15,14 @@ from brb02.hotkeys import HK_CYCLE_GEAR, HK_TOGGLE_SMART, HotkeyManager
 from brb02.logbuf import LOGBUF
 
 from .theme import build_palette, build_qss, temp_color
+from . import motion
 from .widgets import Badge, FanIcon, Toggle, nav_icon, style_combo_popup
 from .pages import (AboutPage, ButtonPage, ControlPage, CurvePage, DevicePage,
                     ScreenPage, StatusPage, MAX_RPM)
 
 APP_NAME = 'Alp 工具箱'
-DOCK_COLLAPSED = 76
-DOCK_EXPANDED = 200
+DOCK_COLLAPSED = 64      # §2: w-16
+DOCK_EXPANDED = 192     # §2: 192px
 
 NAV = [('状态', 'status', 'status'), ('曲线', 'curve', 'curve'),
        ('按键', 'buttons', 'buttons'),
@@ -41,10 +44,10 @@ class TitleBar(QWidget):
     def __init__(self, win: 'MainWindow'):
         super().__init__(win)
         self.win = win
-        self.setFixedHeight(52)
+        self.setFixedHeight(40)      # §2: h-10 (40px 自绘标题栏)
         self.setObjectName('TitleBar')
         h = QHBoxLayout(self)
-        h.setContentsMargins(20, 0, 10, 0)
+        h.setContentsMargins(12, 0, 6, 0)   # §2: px-3
         h.setSpacing(10)
 
         self.badge_conn = Badge('离线', icon_kind='wifi_off', dark=win.cfg.dark)
@@ -62,7 +65,7 @@ class TitleBar(QWidget):
                               ('WinBtnClose', 'close', self._close)):
             b = QPushButton('')
             b.setObjectName(obj)
-            b.setFixedSize(42, 32)
+            b.setFixedSize(40, 32)    # §2: h-8 w-10
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(cb)
             h.addWidget(b)
@@ -159,6 +162,13 @@ class Sidebar(QWidget):
         v.addWidget(self.brand)
         v.addSpacing(18)
 
+        # §2 滑块指示器: 独立绝对定位 pill, 置于按钮底层 (lower), mark() 时签名缓动滑到选中项
+        self.indicator = QWidget(self)
+        self.indicator.setObjectName('NavIndicator')
+        self.indicator.setAttribute(Qt.WA_StyledBackground, True)
+        self.indicator.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.indicator.hide()
+
         self.nav_btns = []
         for name, key, kind in NAV:
             b = self._make_btn(name, key, kind)
@@ -180,7 +190,7 @@ class Sidebar(QWidget):
         b.setObjectName('DockBtn')
         b.setCheckable(True)
         b.setCursor(Qt.PointingHandCursor)
-        b.setIcon(nav_icon(kind, '#98a2b3'))
+        b.setIcon(nav_icon(kind, '#98a2b3', 21))   # 画布=显示尺寸, 杜绝 18→21 升采样糊
         b.setIconSize(QSize(21, 21))
         b.setToolTip(name)
         b._page_key = key
@@ -191,28 +201,115 @@ class Sidebar(QWidget):
         for b in self.nav_btns:
             name = self.LABEL[b._page_key]
             b.setText(('　' + name) if self.expanded else '')
+            # QSS 按 [collapsed="true"] 切换居中/左对齐 (收起态必须居中, 否则图标偏心)
+            b.setProperty('collapsed', 'false' if self.expanded else 'true')
+            b.style().unpolish(b)
+            b.style().polish(b)
 
     def apply_theme(self, dark: bool):
         self.dark = dark
         active = '#ff4b26' if dark else '#2f6df6'
         for b in self.nav_btns:
             kind = self.ICON_KIND[b._page_key]
-            b.setIcon(nav_icon(kind, active if b.isChecked() else '#98a2b3'))
+            b.setIcon(nav_icon(kind, active if b.isChecked() else '#98a2b3', 21))
 
     def mark(self, key: str):
         for b in self.nav_btns:
             b.setChecked(b._page_key == key)
         self.apply_theme(self.dark)
+        self._slide_indicator(key)
+
+    def _target_rect(self, btn: QPushButton) -> QRect:
+        if self.layout() is not None:
+            self.layout().activate()
+        pos = btn.mapTo(self, QPoint(0, 0))
+        bh = btn.height() or 48
+        # 按钮本身已由 Sidebar 布局左右留白 10px (pos.x()=10, 宽=self.width()-20),
+        # 滑块与按钮同框对齐 (旧版多加了 +11 导致滑块整体右偏 11px)
+        return QRect(pos.x(), pos.y(), max(24, self.width() - 20), bh)
+
+    def _slide_indicator(self, key: str):
+        """滑块滑到选中项 (§2: transform 签名缓动)。置于按钮下层 (lower), 不遮挡图标与文字。"""
+        old_anim = getattr(self, '_ind_anim', None)
+        if old_anim is not None:
+            try:
+                old_anim.stop()
+            except RuntimeError:
+                pass
+            self._ind_anim = None
+
+        btn = next((b for b in self.nav_btns if b._page_key == key), None)
+        if btn is None:
+            self.indicator.hide()
+            return
+        target = self._target_rect(btn)
+        self.indicator.lower()                 # 始终在按钮下层, 绝不遮挡按钮图标/文字
+        from . import motion
+        ms = motion.duration(180)
+        if not self.indicator.isVisible() or not self.isVisible() or ms == 0:
+            self.indicator.setGeometry(target)
+            self.indicator.show()
+            self.indicator.lower()
+            return
+        start = QRect(self.indicator.geometry())
+        start.setX(target.x())
+        start.setWidth(target.width())
+        start.setHeight(target.height())
+
+        # 用 C++ QPropertyAnimation 直接驱动 geometry, 避免局部 Python 闭包被 GC 回收导致滑块不走
+        anim = QPropertyAnimation(self.indicator, b'geometry', self)
+        anim.setStartValue(start)
+        anim.setEndValue(target)
+        anim.setDuration(ms)
+        anim.setEasingCurve(motion.ease(motion.EASE_SIGNATURE))
+        anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._ind_anim = anim
+        # 手册 §12: 选中项过冲 pop, 只弹新选中的那个
+        from .widgets import draw_icon_pixmap
+        active = '#ff4b26' if self.dark else '#2f6df6'
+        motion.pop_icon(btn, draw_icon_pixmap(self.ICON_KIND[key], 21, active))
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        btn = next((b for b in self.nav_btns if b.isChecked()), None)
+        if btn is not None and self.indicator.isVisible():
+            self.indicator.setGeometry(self._target_rect(btn))
+            self.indicator.lower()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        # 宽度跟随 (展开/收起动画期间持续校正滑块宽度与位置)
+        anim = getattr(self, '_ind_anim', None)
+        running = False
+        if anim is not None:
+            try:
+                running = anim.state() == QAbstractAnimation.State.Running
+            except RuntimeError:
+                running = False
+        btn = next((b for b in self.nav_btns if b.isChecked()), None)
+        if not running and btn is not None and self.indicator.isVisible():
+            self.indicator.setGeometry(self._target_rect(btn))
+        else:
+            g = self.indicator.geometry()
+            self.indicator.setGeometry(10, g.y(), max(24, self.width() - 20), g.height())
+        self.indicator.lower()
 
     def toggle(self):
         self.expanded = not self.expanded
-        self.setFixedWidth(DOCK_EXPANDED if self.expanded else DOCK_COLLAPSED)
-        self.brand.setText('Alp')
+        # 展开方向: 先出文字随宽度逐渐露出; 收起方向: 宽度收完再清文字/居中,
+        # 避免动画中途图标跳位。200ms 签名缓动 (减少动态效果时 animate_width 自动瞬时)。
         self.btn_toggle.setText('« 收起' if self.expanded else '»')
-        self._apply_collapsed_text()
         for b in self.nav_btns:
             name = self.LABEL[b._page_key]
             b.setToolTip('' if self.expanded else name)
+        if self.expanded:
+            self._apply_collapsed_text()
+            motion.animate_width(self, DOCK_EXPANDED)
+        else:
+            motion.animate_width(
+                self, DOCK_COLLAPSED,
+                on_done=lambda: self._apply_collapsed_text())
+        # 展开方向: 滑块 x 也随宽度走 (resizeEvent 已持续校正)
 
 
 class MainWindow(QMainWindow):
@@ -227,9 +324,21 @@ class MainWindow(QMainWindow):
         self._info_cache = {}
         self.setWindowTitle(APP_NAME)
         self.resize(1240, 820)
+        self._cur_page_key = ''          # 当前页键 (页面切换算方向用)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
-        # 无边框 + 半透明背景 => 窗口四角真正圆角
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        # 圆角方案定稿 (2026-10-25): 默认**不透明窗口 + Win11 DWM 原生圆角**
+        # (系统合成零成本)。半透明分层窗口 (WA_TranslucentBackground) 在切换
+        # 动画期间每帧全窗走 DWM 软件路径 —— 是"切入切出卡"的最后元凶,
+        # perf_log 两轮数据 + 直角对照均指向它。ALP_ROUND=1 可切回旧半透明
+        # 方案对照; ALP_SQUARE=1 纯直角。
+        mode = os.environ.get('ALP_ROUND', '') == '1' and 'round' or             (os.environ.get('ALP_SQUARE', '') == '1' and 'square' or 'native')
+        if mode == 'round':
+            self.setAttribute(Qt.WA_TranslucentBackground)
+        elif mode == 'square':
+            self.setObjectName('AppShellSquare')
+        else:
+            self.setObjectName('AppShellSquare')
+            QTimer.singleShot(0, self._apply_native_round)
 
         shell = QWidget()
         shell.setObjectName('AppShell')
@@ -272,6 +381,7 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(self.wrappers[key])
         self.switch_page('status')
         self.sync_mode_exclusivity()     # 启动即按互斥状态置灰各页的模式控件
+        QTimer.singleShot(500, self._prewarm_pages)   # 启动空档预热各页, 首次进入不顿
 
         # 托盘 (原生 Win11 菜单: 信息行 + 温控曲线子菜单 + 智能变频)
         self.tray = QSystemTrayIcon(_make_app_icon())
@@ -313,6 +423,16 @@ class MainWindow(QMainWindow):
         menu.addAction(a_follow)
         menu.addSeparator()
 
+        # 流畅优先 (2026-10-25): perf_log 判读 —— 该机器对窗口光栅路径极慢,
+        # 任何动画帧都 60-300ms。此开关一键把全部动效退化为瞬时 (motion._REDUCED
+        # 即全部 duration()=0 的既有通道), 切换/交错/hover/仪表追赶全部零成本。
+        a_fast = QAction('流畅优先 (关闭全部动效)', self)
+        a_fast.setCheckable(True)
+        a_fast.setChecked(getattr(motion, '_REDUCED', False) is True)
+        a_fast.toggled.connect(self._set_fast_mode)
+        menu.addAction(a_fast)
+        menu.addSeparator()
+
         a_quit = QAction('退出 Alp 工具箱', self)
         a_quit.triggered.connect(self.real_quit)
         menu.addAction(a_quit)
@@ -346,14 +466,21 @@ class MainWindow(QMainWindow):
 
         self.apply_theme(cfg.dark)
         self.switch_page('status')
-        # 所有下拉弹出层: 圆角无边框 + 主题化配色
-        from PySide6.QtWidgets import QComboBox
-        for combo in self.findChildren(QComboBox):
-            style_combo_popup(combo, cfg.dark)
 
         self.ui_timer = QTimer(self)
         self.ui_timer.timeout.connect(self._ui_heartbeat)
         self.ui_timer.start(3000)
+
+    def _apply_native_round(self):
+        """Win11 DWM 原生窗口圆角 (DWMWA_WINDOW_CORNER_PREFERENCE=ROUND)。
+        系统级合成、零性能成本; Win10 不支持时静默保持直角。"""
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            pref = ctypes.c_int(2)              # DWMWCP_ROUND
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+        except Exception:
+            pass
 
     # ---- 滚动容器 ----
     def _wrap_scroll(self, w: QWidget) -> QWidget:
@@ -396,10 +523,60 @@ class MainWindow(QMainWindow):
         for tg in self.findChildren(Toggle):
             tg.set_dark(dark)   # 自绘开关轨道色随主题 (浅色蓝 / 深色橙)
 
+    def _prewarm_pages(self, _keys=None):
+        """逐页预热 (2026-10-25 流畅度优化)。
+
+        每个页面第一次显示都要现场做布局 + 首绘, 在慢一点的机器上就是"第一次点某个页
+        顿一下"。这里在启动后的空档里, 每 60ms 让一页按栈实际尺寸离屏渲染一次, 把这份成本提前消化;
+        分摊到各页而不是一次做完, 免得启动时反而卡一下。
+        """
+        keys = _keys if _keys is not None else [k for k in self.wrappers if k != self._cur_page_key]
+        if not keys:
+            return
+        w = self.wrappers.get(keys[0])
+        if w is not None and w is not self.stack.currentWidget():
+            try:
+                sz = self.stack.size()
+                if sz.width() > 0 and sz.height() > 0:
+                    w.resize(sz)
+                w.grab()          # 离屏渲染一次 = 强制走完真实尺寸布局 + 字体/样式缓存预热
+            except Exception:
+                pass
+        rest = keys[1:]
+        if rest:
+            QTimer.singleShot(60, lambda: self._prewarm_pages(rest))
+
     def switch_page(self, key: str):
-        if key in self.wrappers:
-            self.stack.setCurrentWidget(self.wrappers[key])   # 修复: 用 wrapper 查找
+        if key not in self.wrappers:
+            return
+        old = self.stack.currentWidget()
+        new = self.wrappers[key]
+        if old is new:
+            self._cur_page_key = key      # 启动时首屏就是当前页, 也要记住, 否则后续方向恒为 0
             self.sidebar.mark(key)
+            return
+        # 侧栏高亮**立即**归一: 按钮是 checkable 的, 点下去它自己就先亮了,
+        # 若等页面动画结束再 mark, 会出现"两个同时亮、过一会儿才归一"的错觉。
+        self.sidebar.mark(key)
+        # 方向感知切换 (复刻 FanControl 2.9.0 §2): 旧页 150ms 淡出上移 → 新页 180ms 淡入下落。
+        # 方向按页面序号算; 程序内跳转 (启动/热键) 用 0 → 纯淡入, 不产生"来回窜"的错觉。
+        keys = list(self.wrappers)
+        try:
+            d = 1 if keys.index(key) > keys.index(self._cur_page_key) else -1
+        except (ValueError, AttributeError):
+            d = 0
+        self._cur_page_key = key
+
+        # 卡片交错 (§3) 与整页淡入**并行**触发 —— 手册里 §2 的入场和 §3 的
+        # data-page-reveal 是同时挂上的; 旧版把 stagger 排在过渡全部结束之后,
+        # 80ms×N 张串行追加, 页面卡片多时整体拖过 1s, 观感就是"慢半拍"。
+        def _enter():
+            motion.stagger_reveal(new)          # §3: 55ms 步进 / 前 5 张 / 代际取消
+
+        if os.environ.get('ALP_SLIDE') == '1':
+            motion.page_transition(self.stack, old, new, direction=d, enter=_enter)
+        else:
+            motion.page_swap(self.stack, old, new, direction=d, enter=_enter)
 
     # ---- 快捷键 ----
     def _hotkey_join(self):
@@ -466,6 +643,20 @@ class MainWindow(QMainWindow):
                                   '退出请右键托盘菜单选「退出」。',
                                   QSystemTrayIcon.Information, 3000)
 
+    def _set_fast_mode(self, on: bool):
+        """托盘一键: 全动效瞬时 (含风扇图标静止)。慢光栅机器的逃生通道。"""
+        from . import motion
+        motion._REDUCED = bool(on)
+        try:
+            from .widgets import FanIcon
+            for fi in self.findChildren(FanIcon):
+                if on:
+                    fi._timer.stop()
+                fi._fast_mode = on
+        except Exception:
+            pass
+        LOGBUF.write(f'[动效] 流畅优先 = {on}')
+
     def real_quit(self):
         """托盘「退出」: 优雅真退出 (走 closeEvent 停 worker/热键, 不留后台)。"""
         self._really_quit = True
@@ -481,7 +672,7 @@ class MainWindow(QMainWindow):
     def _update_tray_info(self):
         """托盘信息行 1s 刷新: 设备状态 / 温度 / 功耗 / 转速"""
         t = self.worker.temps
-        conn = self.worker.device.connected
+        conn = bool(self.is_connected)
         rpm = self.last_rpm or 0
 
         def fmt(v, unit):

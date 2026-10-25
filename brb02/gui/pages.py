@@ -21,13 +21,14 @@ from PySide6.QtWidgets import (
 )
 
 from .curve_editor import CurveEditor, TEMPS, DEFAULT_PCT
+from . import motion
 from brb02 import protocol
 from brb02.diagnostics import APP_VERSION
 from brb02.logbuf import LOGBUF
 from brb02.temps import (REASON_DRIVER, REASON_INIT, REASON_LHM, REASON_NO_ADMIN,
                          REASON_NO_PAWNIO)
 from .theme import chart_color, temp_color
-from .widgets import FanIcon, SemiGauge, Toggle, make_card
+from .widgets import ConnPill, FanIcon, SemiGauge, Toggle, make_card
 
 GEARS = [
     ('静音', '#10b981'), ('标准', '#3b82f6'),
@@ -106,12 +107,10 @@ def _icon_box(kind: str) -> QFrame:
     lay.setContentsMargins(0, 0, 0, 0)
     if kind.lower() in ('cpu', 'gpu', 'fan', 'cooler'):
         from .widgets import draw_icon_pixmap
-        color = '#66758a'
         ch = QLabel()
         ch.setAlignment(Qt.AlignCenter)
         ch.setStyleSheet('background: transparent;')
-        pm = draw_icon_pixmap(kind.lower(), 20, '#66758a')
-        ch.setPixmap(pm.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        ch.setPixmap(draw_icon_pixmap(kind.lower(), 20, '#66758a'))
         lay.addWidget(ch)
     else:
         ch = QLabel(kind)
@@ -189,7 +188,8 @@ class StatusPage(QWidget):
             f"background:{'#1a2029' if self.dark else '#e8eefc'}; border-radius:18px;")
         il = QVBoxLayout(icon_wrap)
         il.setContentsMargins(0, 0, 0, 0)
-        self.fan_icon = FanIcon(36, '#ff4b26' if self.dark else '#2f6df6')
+        self.fan_icon = FanIcon(36, '#ff4b26' if self.dark else '#2f6df6',
+                                bg='#1a2029' if self.dark else '#e8eefc')   # = icon_wrap 底色, opaque 重绘不拖整窗
         il.addWidget(self.fan_icon, 0, Qt.AlignCenter)
         row.addWidget(icon_wrap, 0, Qt.AlignVCenter)
 
@@ -200,7 +200,7 @@ class StatusPage(QWidget):
         self.lbl_name = QLabel('黑鲨风神Pro')
         self.lbl_name.setStyleSheet('font-size:18px; font-weight:800; background:transparent;')
         name_row.addWidget(self.lbl_name)
-        self.lbl_conn = _pill('离线', '#ef4444')
+        self.lbl_conn = ConnPill(self.dark)      # 呼吸圈连接胶囊 (§9 pulse-ring)
         name_row.addWidget(self.lbl_conn)
         self.lbl_ready = QLabel('')
         name_row.addWidget(self.lbl_ready)
@@ -233,6 +233,8 @@ class StatusPage(QWidget):
         row.addLayout(col2)
         hv.addLayout(row)
         v.addWidget(hero)
+        # 主题扫描线: 已下线 (2026-10-25) —— 常驻半透明大面积动画在真机上
+        # 持续拖动整窗刷新 (perf_log 实证), 流畅度优先。attach_scan 保留未调用。
 
         # 三联仪表
         gauges = QFrame()
@@ -338,8 +340,10 @@ class StatusPage(QWidget):
     def set_dark(self, dark):
         self.dark = dark
         self.fan_icon.color = '#ff4b26' if dark else '#2f6df6'
+        self.fan_icon._bg = '#1a2029' if dark else '#e8eefc'   # 与 icon_wrap 同步
         self.icon_wrap.setStyleSheet(
             f"background:{'#1a2029' if dark else '#e8eefc'}; border-radius:18px;")
+        self.lbl_conn.set_dark(dark)
         self.mini_curve.dark = dark          # 风扇速度曲线 (自绘, 颜色随 dark)
         for gw in (self.gauge_cpu, self.gauge_gpu, self.gauge_fan):
             gw.dark = dark
@@ -480,11 +484,7 @@ class StatusPage(QWidget):
         theme = self.ctx['theme']
         # 断开/连接按钮文案跟随真实连接态 (连接状态变化都会走到这里), 防与 _paused 脱钩
         self.btn_disconnect.setText('断开' if conn else '连接')
-        self.lbl_conn.setText('已连接' if conn else '离线')
-        self.lbl_conn.setStyleSheet(
-            f'font-size:12px; padding:3px 12px; border-radius:11px;'
-            + (f'color:{theme.primary}; background:{theme.chip_bg};'
-               if conn else 'color:#ef4444; background:rgba(239,68,68,0.10);'))
+        self.lbl_conn.set_state(conn, self.dark)
         smart = self.ctx['cfg'].curve_enabled
         c = info.get('cooling')
         if smart:
@@ -1506,9 +1506,15 @@ class ButtonPage(QWidget):
 
 
 class ControlPage(QWidget):
+    _lightFetched = Signal(object, object)
+    _fwFetched = Signal(str)
+
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
         self.ctx = ctx
+        self._light_refreshing = False
+        self._lightFetched.connect(self._apply_light_ui)
+        self._fwFetched.connect(lambda fw: self.lbl_fw.setText(fw) if fw else None)
         cfg = self.ctx['cfg']
         v = QVBoxLayout(self)
         v.setContentsMargins(6, 4, 6, 6)
@@ -1925,7 +1931,7 @@ class ControlPage(QWidget):
         cv4.addWidget(b_apply)
         lv.addWidget(card4)
         lv.addStretch(1)
-        QTimer.singleShot(400, self._light_refresh)
+        QTimer.singleShot(400, self._light_refresh_safe)
 
         # --- 系统设置 ---
         sysw = QWidget()
@@ -1947,14 +1953,15 @@ class ControlPage(QWidget):
         self.tgl_hotkey = Toggle(cfg.hotkeys_enabled)
         self.tgl_hotkey.toggled = self._hotkey_toggled
         cv3.addWidget(_setting_row('全局快捷键', 'Ctrl+Alt+F1 循环挡位 · Ctrl+Alt+F2 智能变频', '⌨️', self.tgl_hotkey))
-        self.tgl_autostart = Toggle(self._get_autostart())
+        autostart_on = self._get_autostart()
+        self.tgl_autostart = Toggle(autostart_on)
         self.tgl_autostart.toggled = self._autostart_toggled
         cv3.addWidget(_setting_row('开机自启动', '任务计划最高权限开机静默启动 (免 UAC 弹窗, CPU 温度可用)', '🚀', self.tgl_autostart))
         self.tgl_autostart_min = Toggle(getattr(cfg, 'autostart_minimized', False))
         self.tgl_autostart_min.toggled = self._autostart_min_toggled
         self.row_autostart_min = _setting_row('启动后最小化到托盘', '开机自启动时不弹主窗口, 静默驻留后台温控', '🛸', self.tgl_autostart_min)
         cv3.addWidget(self.row_autostart_min)
-        _dim_widget(self.row_autostart_min, not self._get_autostart(), '先开启「开机自启动」')
+        _dim_widget(self.row_autostart_min, not autostart_on, '先开启「开机自启动」')
         sv.addWidget(card3)
         sv.addStretch(1)
 
@@ -2092,15 +2099,29 @@ class ControlPage(QWidget):
         self.lbl_speed.setText(f'{rpm} RPM' if rpm else '-- RPM')
         self._update_trim_info(rpm)
 
+    def _trim_label(self):
+        """转速校准信息行挂在 **CurvePage** 的「手动挡位」卡里 (2026-10-22 加的功能),
+        而刷新逻辑留在了 ControlPage —— 于是 `getattr(self, 'lbl_trim_info', None)`
+        在 ControlPage 上永远拿到 None, 直接 return, **该标签自创建起从未点亮过**
+        (第二任动效开发在交接回执 §5 里报出来的存量 bug)。
+        这里跨页取一次: 先看自己, 再问主窗口的 pages['curve']。
+        """
+        lbl = getattr(self, 'lbl_trim_info', None)
+        if lbl is not None:
+            return lbl
+        main = self.ctx.get('main')
+        curve = (getattr(main, 'pages', None) or {}).get('curve')
+        return getattr(curve, 'lbl_trim_info', None)
+
     def _update_trim_info(self, rpm: int):
         """开了转速校准才显示: 目标 / 下发 / 实测 / 补偿量。"""
-        lbl = getattr(self, 'lbl_trim_info', None)
+        lbl = self._trim_label()
         if lbl is None:
             return
         cfg = self.ctx.get('cfg')
         mode = getattr(cfg, 'rpm_trim_mode', 'off')
         if mode == 'off' or not rpm:
-            lbl.setVisible(False)
+            motion.reveal_block(lbl, False)
             return
         w = self.ctx.get('worker')
         target = getattr(w, '_last_sent_rpm', None)
@@ -2108,7 +2129,7 @@ class ControlPage(QWidget):
         trim = (cmd - target) if (cmd and target) else 0
         lbl.setText(f'转速校准 ({mode}): 目标 {target or "--"} · 下发 {cmd or "--"} · '
                     f'实测 {rpm} · 补偿 {trim:+d} RPM')
-        lbl.setVisible(True)
+        motion.reveal_block(lbl, True)
 
     def on_info(self, info: dict):
         """连接态 / 配置派生字段 (15s 周期 + 连接变化时立即触发)。实时转速见 on_status。"""
@@ -2117,6 +2138,15 @@ class ControlPage(QWidget):
         self.lbl_dev_state.setText('已连接' if conn else '未连接')
         if not conn:
             self.lbl_speed.setText('-- RPM')       # 断线: 转速数据源失效
+        if info:
+            fw = info.get('firmware')
+            if fw and fw != '?':
+                self.lbl_fw.setText(str(fw))
+            rgb_on = info.get('rgb_on')
+            if rgb_on is not None:
+                self.tgl_light_on.blockSignals(True)
+                self.tgl_light_on.setChecked(bool(rgb_on))
+                self.tgl_light_on.blockSignals(False)
         # 灯光开关初始态: 连接建立后用设备真实值刷新一次
         # (构造时设备多半还没连上, 开关停留在默认值)
         if conn and not getattr(self, '_light_synced', False):
@@ -2150,7 +2180,7 @@ class ControlPage(QWidget):
                 self.banner_cpu.setText(
                     '⚠ CPU 温度读不到，且温控源是 CPU —— 风扇不会自动调节，点此处理'
                     if src_cpu else '⚠ ' + _cpu_reason_text(reason))
-                self.banner_cpu.setVisible(True)
+                motion.reveal_block(self.banner_cpu, True)
                 info = {}
                 try:
                     info = t.driver_info()
@@ -2166,7 +2196,7 @@ class ControlPage(QWidget):
                 self._cpu_hint_shown = False
                 self._cpu_reason = None
                 self.lbl_cpu_val.setToolTip('')
-                self.banner_cpu.setVisible(False)
+                motion.reveal_block(self.banner_cpu, False)
         cp, gp = t.cpu_power, t.gpu_power
         self.lbl_cpu_pow.setText(f'{cp:.0f} W' if cp and cp > 0 else '- W')
         self.lbl_gpu_pow.setText(f'{gp:.0f} W' if gp and gp > 0 else '- W')
@@ -2282,12 +2312,17 @@ class ControlPage(QWidget):
                 tg.blockSignals(True)
                 tg.setChecked(bool(res.get(key)))
                 tg.blockSignals(False)
-            try:
-                fw = self.ctx['worker'].device.get_firmware_version()
-                if fw:
-                    self.lbl_fw.setText(fw)
-            except Exception:
-                pass
+            # 固件版本查询必须走后台线程: 在 GUI 主线程直接调 get_firmware_version()
+            # 会争夺 device._lock 并阻塞事件循环 ~0.5-1.3s
+            import threading
+            def _fetch_fw():
+                try:
+                    fw = self.ctx['worker'].device.get_firmware_version()
+                    if fw and fw != '?':
+                        self._fwFetched.emit(str(fw))
+                except Exception:
+                    pass
+            threading.Thread(target=_fetch_fw, daemon=True).start()
         except Exception:
             pass
 
@@ -2365,8 +2400,12 @@ class ControlPage(QWidget):
         btn_read.clicked.connect(_do_read)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(dlg.accept)
-        bb.rejected.connect(dlg.reject)
+        # 手册 §4: 对话框开 ease-out / 关 ease-in 各 150ms。
+        # 必须经 fader.close 走淡出 —— 直接连 dlg.accept 会在动画开始前就 done+hide。
+        from . import motion
+        fader = motion.dialog_fade(dlg)
+        bb.accepted.connect(lambda: fader.close(QDialog.Accepted))
+        bb.rejected.connect(lambda: fader.close(QDialog.Rejected))
         v.addWidget(bb)
         if dlg.exec() == QDialog.Accepted:
             cfg.param_page_ids = [c.currentData() for c in combos]
@@ -2471,13 +2510,12 @@ class ControlPage(QWidget):
         except Exception:
             pass
 
-    def _light_refresh(self):
-        sw = self.ctx['worker'].get_rgb_switch()
+    def _apply_light_ui(self, sw, eff):
+        """在 GUI 主线程将后台读取的灯效状态回填到控件。"""
         if sw is not None:
             self.tgl_light_on.blockSignals(True)
-            self.tgl_light_on.setChecked(sw)
+            self.tgl_light_on.setChecked(bool(sw))
             self.tgl_light_on.blockSignals(False)
-        eff = self.ctx['worker'].get_lighting()
         if not eff:
             return
         ctrls = [self.cmb_light_mode, self.cmb_light_cm, self.sld_hue, self.sld_bri, self.sld_spd]
@@ -2487,7 +2525,6 @@ class ControlPage(QWidget):
             mode_raw = eff['mode']
             # 回读按**槽位** (低 nibble) 匹配: 设备回读的是当前槽位 byte0 =
             # (颜色选项<<4)|槽位(1..8), 高 nibble 是配色选项, 不参与模式判定。
-            # (旧写法以全字节为键 → `0x11 & 0x0F = 1` 落空 → "彩色流动"被错显示成"呼吸"。)
             idx = {(m & 0x0F): i for i, (_, m) in enumerate(self._light_modes)}.get(mode_raw & 0x0F, 2)
             self.cmb_light_mode.setCurrentIndex(idx)
             if getattr(self, 'cmb_color_opt', None) is not None:
@@ -2505,12 +2542,32 @@ class ControlPage(QWidget):
                 c.blockSignals(False)
         self._light_preview()
 
+    def _light_refresh(self):
+        sw = self.ctx['worker'].get_rgb_switch()
+        eff = self.ctx['worker'].get_lighting()
+        self._apply_light_ui(sw, eff)
+
     def _light_refresh_safe(self, *_):
-        """防御式刷新灯效状态: 设备查询失败只记日志, 不影响 UI。"""
-        try:
-            self._light_refresh()
-        except Exception as e:
-            LOGBUF.write(f'[灯效] 状态刷新失败: {e!r}')
+        """异步刷新灯效状态: USB 查询在后台线程执行 (get_rgb_switch + get_lighting 各需 ~0.45s
+        且需等 device._lock —— 旧版在 GUI 主线程同步调用导致切入设置页 200ms 时整窗冻结 ~2.0s)。"""
+        if getattr(self, '_light_refreshing', False):
+            return
+        if not getattr(self.ctx.get('main'), 'is_connected', False):
+            return
+        self._light_refreshing = True
+        import threading
+
+        def _bg():
+            try:
+                sw = self.ctx['worker'].get_rgb_switch()
+                eff = self.ctx['worker'].get_lighting()
+                self._lightFetched.emit(sw, eff)
+            except Exception as e:
+                LOGBUF.write(f'[灯效] 状态刷新失败: {e!r}')
+            finally:
+                self._light_refreshing = False
+
+        threading.Thread(target=_bg, daemon=True).start()
 
     def _autoswitch_changed(self, on):
         self.ctx['cfg'].auto_switch = on
@@ -2541,24 +2598,29 @@ class ControlPage(QWidget):
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         return f'"{sys.executable}" "{os.path.join(root, "main.py")}"'
 
-    def _get_autostart(self) -> bool:
+    def _get_autostart(self, force: bool = False) -> bool:
         """任务计划 AlpToolbox 存在 (RL HIGHEST, 登录静默提权) 即视为开启。
 
         旧版写 HKCU Run 的遗留值也算数 (切换时会顺手清理, 避免双启动 + 每次弹 UAC)。"""
+        if not force and hasattr(self, '_autostart_cache'):
+            return bool(self._autostart_cache)
         try:
             import winreg
             winreg.QueryValueEx(winreg.OpenKey(
                 winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Run'),
                 'Brb02Toolbox')
+            self._autostart_cache = True
             return True
         except Exception:
             pass
         try:
             r = subprocess.run(f'schtasks /Query /TN "{self._AUTOSTART_TASK}"',
                                capture_output=True, creationflags=0x08000000)
-            return r.returncode == 0
+            self._autostart_cache = (r.returncode == 0)
+            return self._autostart_cache
         except Exception as e:
             LOGBUF.write(f'[自启动] 查询失败: {e!r}')
+            self._autostart_cache = False
             return False
 
     def _autostart_legacy_run_clear(self):
@@ -2591,6 +2653,7 @@ class ControlPage(QWidget):
                 cmd = f'schtasks /Delete /F /TN "{self._AUTOSTART_TASK}"'
             r = subprocess.run(cmd, capture_output=True, creationflags=0x08000000)
             if r.returncode == 0:
+                self._autostart_cache = bool(on)
                 if on:
                     self._autostart_legacy_run_clear()
                 LOGBUF.write(f'[自启动] {"已开启 (任务计划: 登录时管理员身份静默运行)" if on else "已关闭"}')
@@ -2599,11 +2662,11 @@ class ControlPage(QWidget):
             err = (r.stderr or r.stdout or b'').decode('gbk', 'replace').strip() \
                 or f'exit={r.returncode}'
             LOGBUF.write(f'[自启动] {"开启" if on else "关闭"}失败: {err}')
-            self.tgl_autostart.setChecked(self._get_autostart())   # 回滚开关视觉
+            self.tgl_autostart.setChecked(self._get_autostart(force=True))   # 回滚开关视觉
             self._sync_autostart_min_dim()
         except Exception as e:
             LOGBUF.write(f'[自启动] 操作异常: {e!r}')
-            self.tgl_autostart.setChecked(self._get_autostart())
+            self.tgl_autostart.setChecked(self._get_autostart(force=True))
             self._sync_autostart_min_dim()
 
     def _autostart_min_toggled(self, on):
@@ -3082,6 +3145,7 @@ def fit_image(img: QImage, fit: str) -> QImage:
 
 class ScreenPage(QWidget):
     """屏幕图片页: 选图/拖入 (PNG/JPG) → 预览 (428:142) → 上传到散热器屏幕。"""
+    _lcdSwitchFetched = Signal(object)
 
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
@@ -3089,6 +3153,7 @@ class ScreenPage(QWidget):
         self.cfg = ctx['cfg']
         self._path = None
         self._img_valid = False       # 预览可解码才允许上传 (默认无效, 防坏图混入)
+        self._lcdSwitchFetched.connect(self._apply_screen_switch_ui)
         self._busy = False
         self.setAcceptDrops(True)
 
@@ -3449,19 +3514,29 @@ class ScreenPage(QWidget):
         else:
             self.lbl_screen.setText('设备当前: ' + ('开启' if res else '关闭'))
 
-    def _refresh_screen_switch(self):
-        """连接建立后回填屏幕开关真实状态 (Toggle.setChecked 不发 toggled, 不会误写)。"""
-        st = self.ctx['worker'].get_lcd_switch_status()
+    def _apply_screen_switch_ui(self, st):
         if st is None:
             self.lbl_screen.setText('状态未知 (未连接)')
             return
         self.tgl_screen.setChecked(bool(st))
         self.lbl_screen.setText('设备当前: ' + ('开启' if st else '关闭'))
 
+    def _refresh_screen_switch(self):
+        """连接建立后回填屏幕开关真实状态 (Toggle.setChecked 不发 toggled, 不会误写)。"""
+        st = self.ctx['worker'].get_lcd_switch_status()
+        self._apply_screen_switch_ui(st)
+
     def _on_conn_changed(self, ok, msg):
         self._sync_buttons()
         if ok:
-            self._refresh_screen_switch()
+            import threading
+            def _bg():
+                try:
+                    st = self.ctx['worker'].get_lcd_switch_status()
+                    self._lcdSwitchFetched.emit(st)
+                except Exception:
+                    pass
+            threading.Thread(target=_bg, daemon=True).start()
 
     def _upload(self):
         if not self._path or self._busy or not self._img_valid:

@@ -10,7 +10,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QEvent, QObject, QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
 
@@ -60,10 +60,16 @@ def _err_log(msg: str):
 
 
 def main():
+    # ALP_RHI=1: 控件走 GPU 合成 (Qt6 RHI)。此前不敢开是因为 QGraphicsEffect
+    # 与 RHI 不兼容 —— 现在阴影已烘焙、effect 全部退出热路径, 可以 A/B 了。
+    if os.environ.get('ALP_RHI') == '1':
+        os.environ['QT_WIDGETS_RHI'] = '1'
     page = None
     if '--page' in sys.argv:
         page = sys.argv[sys.argv.index('--page') + 1]
 
+    global T0
+    T0 = time.perf_counter()
     try:
         _run(page)
     except SystemExit:
@@ -74,10 +80,38 @@ def main():
         raise
 
 
+class _PerfLog(QObject):
+    """--perf-log: 记录真实帧间隔 (>25ms 判肥帧), 退出时写文件让用户回传。
+
+    用法: Alp工具箱.exe --perf-log     → 切几页、悬停、等几秒, 退出后
+    %APPDATA%/Brb02Toolbox/perf_log.txt 即真实绘制节奏 (_widget 列为肥帧元凶)。"""
+
+    def __init__(self):
+        super().__init__()
+        self._last = None
+        self.rows = []
+        self.n_paints = 0
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Paint:
+            self.n_paints += 1
+            now = time.perf_counter()
+            if self._last is not None:
+                gap = now - self._last
+                if gap > 0.025:
+                    self.rows.append(f'{now - T0:8.3f}s  gap={gap * 1000:6.1f}ms  '
+                                     f'{type(obj).__name__}')
+            self._last = now
+        return False
+
+
 def _run(page):
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyle('Fusion')
+    global perf
+    perf = _PerfLog()
+    app.installEventFilter(perf)      # 常开: 退出自动写 perf_log.txt, 排查不用复现
     app.setWindowIcon(_make_app_icon())
     load_fonts()
     _ensure_admin()        # 提权最先做: 提权重启的新实例不能撞见旧实例的单实例管道
@@ -135,7 +169,15 @@ def _run(page):
     if cfg.restore_on_start and not cfg.curve_enabled:
         # quiet: 启动 2.5s 时可能还没连上, 静默跳过; 连上后引擎会自行恢复固定转速。
         # 曲线模式下引擎按曲线控速, 恢复固定转速是白做且会扰动曲线, 直接跳过。
-        QTimer.singleShot(2500, lambda: worker.apply_fixed_rpm(cfg.fixed_rpm, quiet=True))
+        # 走后台线程下发, 避免在 GUI 主线程同步等待 USB 锁与 0.3s 应答窗口。
+        import threading as _th
+        QTimer.singleShot(
+            2500,
+            lambda: _th.Thread(
+                target=lambda: worker.apply_fixed_rpm(cfg.fixed_rpm, quiet=True),
+                daemon=True,
+            ).start(),
+        )
 
     # --snap N [页名]: N 秒后自截 UI (验证用), 可选 --snap-quit 截完退出
     if '--snap' in sys.argv:
@@ -152,7 +194,21 @@ def _run(page):
                 win.real_quit()
         QTimer.singleShot(secs * 1000, _snap)
 
-    sys.exit(app.exec())
+    rc = app.exec()
+    if perf is not None:
+        try:
+            import os as _os
+            out = _os.path.join(_os.environ.get('APPDATA', '.'), 'Brb02Toolbox', 'perf_log.txt')
+            _os.makedirs(_os.path.dirname(out), exist_ok=True)
+            with open(out, 'a', encoding='utf-8') as f:
+                f.write('\n==== session ' + time.strftime('%Y-%m-%d %H:%M:%S') + ' ====\n')
+                f.write('paints=%d fat_frames(>25ms)=%d\n' % (perf.n_paints, len(perf.rows)))
+                if perf.rows:
+                    f.write(chr(10).join(perf.rows[-400:]) + '\n')
+            print(f'perf log: {out}')
+        except Exception:
+            pass
+    sys.exit(rc)
 
 
 if __name__ == '__main__':
