@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
     QProgressBar, QPushButton, QApplication,
-    QDialog, QSlider, QSizePolicy, QSpinBox, QStackedWidget,
+    QDialog, QDialogButtonBox, QSlider, QSizePolicy, QSpinBox, QStackedWidget,
     QVBoxLayout, QWidget,
 )
 
@@ -301,9 +301,14 @@ class StatusPage(QWidget):
         sub = QLabel('RPM')
         sub.setObjectName('CardHint')
         mv.addWidget(sub)
-        self.mini_curve = CurveEditor(self.dark, rpm_axis=True)
+        self.mini_curve = CurveEditor(self.dark, rpm_axis=True, editable=False)
         self.mini_curve.setMinimumHeight(200)
         mv.addWidget(self.mini_curve)
+        # 2026-10-28: 曲线页改完立刻同步到这张卡片, 不再等下一次状态刷新 (原来最多差 1 拍)
+        try:
+            self.ctx['main'].curveChanged.connect(self._sync_mini_curve)
+        except Exception:
+            pass
         bottom.addWidget(mini, 5)
 
         # 功耗统计卡 (CPU / GPU / 散热器风扇: 当前 + 平均)
@@ -462,6 +467,13 @@ class StatusPage(QWidget):
         self.pw_avg['gpu'].setText(f'平均 {sum(gpu_ps)/len(gpu_ps):.0f} W' if gpu_ps else '平均 --')
         self.pw_avg['fan'].setText(f'平均 {sum(fan_est)/len(fan_est):.0f} W (估算)'
                                    if fan_est else '平均 --')
+
+    def _sync_mini_curve(self):
+        """曲线页保存后立即刷新状态页卡片 (原来要等下一拍状态刷新, 表现为"慢半拍")。"""
+        try:
+            self.mini_curve.set_curve(self.ctx['main'].curve_pct())
+        except Exception:
+            pass
 
     def on_temps(self, cpu, gpu):
         self._last_cpu, self._last_gpu = cpu, gpu
@@ -1508,13 +1520,16 @@ class ButtonPage(QWidget):
 class ControlPage(QWidget):
     _lightFetched = Signal(object, object)
     _fwFetched = Signal(str)
+    _fpsSelfTestDone = Signal(dict)
 
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self._light_refreshing = False
+        self._fps_testing = False
         self._lightFetched.connect(self._apply_light_ui)
         self._fwFetched.connect(lambda fw: self.lbl_fw.setText(fw) if fw else None)
+        self._fpsSelfTestDone.connect(self._fps_on_selftest_done)
         cfg = self.ctx['cfg']
         v = QVBoxLayout(self)
         v.setContentsMargins(6, 4, 6, 6)
@@ -1952,7 +1967,7 @@ class ControlPage(QWidget):
         cv3.addWidget(_setting_row('标题栏按钮', '右上角窗口按钮的粗细档位', '➖', self.cmb_btn_style))
         self.tgl_hotkey = Toggle(cfg.hotkeys_enabled)
         self.tgl_hotkey.toggled = self._hotkey_toggled
-        cv3.addWidget(_setting_row('全局快捷键', 'Ctrl+Alt+F1 循环挡位 · Ctrl+Alt+F2 智能变频', '⌨️', self.tgl_hotkey))
+        cv3.addWidget(_setting_row('全局快捷键', 'Ctrl+Alt+F1 循环挡位 · Ctrl+Alt+F2 智能变频 · Ctrl+Alt+F3 性能浮窗', '⌨️', self.tgl_hotkey))
         autostart_on = self._get_autostart()
         self.tgl_autostart = Toggle(autostart_on)
         self.tgl_autostart.toggled = self._autostart_toggled
@@ -2011,8 +2026,11 @@ class ControlPage(QWidget):
         hv.addWidget(card5)
         hv.addStretch(1)
 
+        # --- 性能浮窗 (0.2.1, 类 NVIDIA 统计数据浮层) ---
+        ov_tab = self._build_overlay_tab(cfg)
+
         return [('设备设置', dev), ('风扇控制', fan), ('灯效', light),
-                ('系统设置', sysw), ('散热器屏幕', hint)]
+                ('性能浮窗', ov_tab), ('系统设置', sysw), ('散热器屏幕', hint)]
 
     # ---- 槽 ----
     def sync_smart(self, on):
@@ -2681,6 +2699,1027 @@ class ControlPage(QWidget):
         """最小化开关的可用性跟随任务计划实际状态。"""
         _dim_widget(self.row_autostart_min, not self._get_autostart(), '先开启「开机自启动」')
 
+    # ---- 性能浮窗 (0.2.1, 对齐 NVIDIA 统计数据浮层) ----
+    def _build_overlay_tab(self, cfg):
+        from brb02.overlay import OVERLAY_ITEM_DEFS, PRESET_COORDS
+        ovw = QWidget()
+        ov_lay = QVBoxLayout(ovw)
+        ov_lay.setContentsMargins(0, 0, 0, 0)
+        ov_lay.setSpacing(10)
+
+        # 卡片 0: FPS 采集诊断 (PresentMon 需要管理员权限创建 ETW 会话;
+        # 不显示 FPS 时必须能一眼看出卡在哪一步, 而不是对着 -- 猜)
+        card_fps, _, c_fps = _card(
+            'FPS 采集 (PresentMon)',
+            'FPS 由 Intel PresentMon 通过 ETW 事件流采集（零进程注入，需管理员权限）。'
+            '点击「自检」会限时采集 3 秒并显示真实结果。')
+        self.lbl_fps_status = QLabel('未启动')
+        self.lbl_fps_status.setObjectName('StatVal')
+        fps_row_wrap = QWidget()
+        fr_h = QHBoxLayout(fps_row_wrap)
+        fr_h.setContentsMargins(0, 0, 0, 0)
+        fr_h.setSpacing(10)
+        self.btn_fps_selftest = QPushButton('自检')
+        self.btn_fps_selftest.setCursor(Qt.PointingHandCursor)
+        self.btn_fps_selftest.setMinimumWidth(72)
+        self.btn_fps_selftest.clicked.connect(self._fps_run_selftest)
+        fr_h.addWidget(self.lbl_fps_status, 1)
+        fr_h.addWidget(self.btn_fps_selftest)
+        self.row_fps_status = _setting_row(
+            '采集器状态', '未启动 / 运行中 / 权限不足 / 采集异常', '📡', fps_row_wrap)
+        c_fps.addWidget(self.row_fps_status)
+
+        self.lbl_fps_test = QLabel('')
+        self.lbl_fps_test.setObjectName('CardHint')
+        self.lbl_fps_test.setWordWrap(True)
+        self.lbl_fps_test.setVisible(False)
+        c_fps.addWidget(self.lbl_fps_test)
+
+        # 全屏兼容性修复: 很多游戏勾了「全屏优化」后会走 MPO/独立翻转,
+        # DWM 合成层被绕过 → 任何置顶浮窗 (含 NVIDIA/网易云歌词) 都会消失。
+        # 给游戏 exe 打上 DISABLEDXMAXIMIZEDWINDOWEDMODE 兼容标记即可恢复。
+        btn_fsfix = QPushButton('检查/恢复全屏优化…')
+        btn_fsfix.setCursor(Qt.PointingHandCursor)
+        btn_fsfix.setToolTip('检查是否有程序被关闭了「全屏优化」。'
+                             '被关闭 = 真独占全屏 = 任何置顶浮窗都画不上去。')
+        btn_fsfix.clicked.connect(self._ov_fix_fullscreen_compat)
+        c_fps.addWidget(_setting_row(
+            '全屏看不到浮窗? 先查这一项',
+            '被关闭「全屏优化」的游戏会走真独占全屏，浮窗必然消失；'
+            '点这里检查并一键恢复。恢复后需完全退出游戏再启动',
+            '🖥️', btn_fsfix))
+
+        btn_mpo = QPushButton('禁用系统 MPO…')
+        btn_mpo.setCursor(Qt.PointingHandCursor)
+        btn_mpo.setToolTip('关闭 Windows 多平面覆盖 (MPO)。全屏游戏占用独立硬件平面盖住'
+                           '所有置顶窗口时，这是唯一无需进程注入的解法。需重启生效。')
+        btn_mpo.clicked.connect(self._ov_fix_mpo)
+        c_fps.addWidget(_setting_row(
+            '仍然看不到？（进阶）',
+            '关闭 Windows「多平面覆盖 MPO」：游戏会占用独立硬件平面盖住所有置顶窗口，'
+            '关掉后游戏回落到 DWM 合成。需重启生效，可一键撤销',
+            '🧩', btn_mpo))
+
+        btn_etw = QPushButton('清理 ETW 冲突…')
+        btn_etw.setCursor(Qt.PointingHandCursor)
+        btn_etw.setToolTip('检查并一键停止挤占系统 ETW 缓冲的第三方跟踪会话 (如 N 卡性能监控、seraph 等)。')
+        btn_etw.clicked.connect(self._ov_clean_etw_sessions)
+        c_fps.addWidget(_setting_row(
+            'ETW 事件丢弃/会话拥塞？',
+            '停止挤占系统 ETW 缓冲的第三方跟踪会话 (NVIDIA NVTOPPS / seraph 等)，释放缓冲',
+            '🧹', btn_etw))
+
+        # 排障取证: 在「看不到浮窗」的那一刻点一下, 把当时的窗口/合成/截图全录下来。
+        # 没有这个, 只能靠用户口述"全屏看不到", 而实测截图证明某些场景其实是显示的。
+        btn_probe = QPushButton('全屏排障快照')
+        btn_probe.setCursor(Qt.PointingHandCursor)
+        btn_probe.setToolTip('在看不到浮窗的那一刻点击：记录前台窗口、Z 序、合成状态，'
+                             '并抓一张全屏截图，用于判定是真独占全屏还是别的原因。')
+        btn_probe.clicked.connect(self._ov_fullscreen_probe)
+        c_fps.addWidget(_setting_row(
+            '看不到的时候点一下',
+            '把当时的窗口状态 + 全屏截图写成一份证据。真独占全屏会记录为 '
+            '「游戏 band=1 但截不到浮窗」',
+            '📷', btn_probe))
+        ov_lay.addWidget(card_fps)
+
+        # 卡片 1: 浮窗总控 + 拖动解锁 + 样式预设 + 全屏独占边界说明
+        card_main, _, c_main = _card(
+            '性能浮窗',
+            '在桌面与「无边框窗口化」游戏上显示实时帧率 / 温度 / 占用 / 散热器转速，'
+            '支持 Ctrl+Alt+F3 全局快捷键与托盘菜单一键开关。')
+        self.tgl_overlay = Toggle(bool(getattr(cfg, 'overlay_enabled', False)))
+        self.tgl_overlay.toggled = self._ov_enabled_toggled
+        c_main.addWidget(_setting_row(
+            '启用性能浮窗',
+            '开启后常驻置顶显示 (快捷键 Ctrl+Alt+F3 · 托盘菜单可随时开关)',
+            '📊', self.tgl_overlay))
+
+        self.tgl_ov_drag = Toggle(False)
+        self.tgl_ov_drag.toggled = self._ov_drag_toggled
+        c_main.addWidget(_setting_row(
+            '允许鼠标拖动浮窗',
+            '默认开启鼠标穿透 (不挡游戏点击、不抢焦点); 开启此项后可直接用鼠标拖拽浮窗位置',
+            '✥', self.tgl_ov_drag))
+
+        self.tgl_ov_game_only = Toggle(bool(getattr(cfg, 'overlay_game_only', False)))
+        self.tgl_ov_game_only.toggled = self._ov_game_only_toggled
+        c_main.addWidget(_setting_row(
+            '仅在游戏运行时显示浮窗',
+            '开启后整个浮窗仅在所选程序有呈现帧时显示',
+            '🎮', self.tgl_ov_game_only))
+        self.btn_ov_game_processes = QPushButton('选择程序…')
+        self.btn_ov_game_processes.clicked.connect(
+            lambda: self._choose_overlay_processes('overlay'))
+        self.lbl_ov_game_processes = QLabel(self._process_summary(
+            getattr(cfg, 'overlay_game_processes', [])))
+        process_row = QWidget()
+        process_layout = QHBoxLayout(process_row)
+        process_layout.setContentsMargins(0, 0, 0, 0)
+        process_layout.addWidget(self.lbl_ov_game_processes, 1)
+        process_layout.addWidget(self.btn_ov_game_processes)
+        self.btn_clear_ov_game_processes = QPushButton('清除')
+        self.btn_clear_ov_game_processes.setToolTip('清除已选的浮窗目标程序')
+        self.btn_clear_ov_game_processes.clicked.connect(
+            lambda: self._clear_overlay_processes('overlay'))
+        process_layout.addWidget(self.btn_clear_ov_game_processes)
+        c_main.addWidget(_setting_row('浮窗目标程序', '多选进程；清空后按任意活跃 3D 程序判断', '⌕', process_row))
+        self.btn_ov_game_processes.setEnabled(bool(getattr(cfg, 'overlay_game_only', False)))
+        self.btn_clear_ov_game_processes.setEnabled(bool(getattr(cfg, 'overlay_game_only', False)))
+
+        self.tgl_fps_game_only = Toggle(bool(getattr(cfg, 'fps_game_only', False)))
+        self.tgl_fps_game_only.toggled = self._fps_game_only_toggled
+        c_main.addWidget(_setting_row(
+            '仅在游戏运行时显示 FPS 数值',
+            '开启后桌面状态隐藏 FPS 数值，其他浮窗指标不受影响',
+            '▣', self.tgl_fps_game_only))
+        self.btn_fps_game_processes = QPushButton('选择程序…')
+        self.btn_fps_game_processes.clicked.connect(
+            lambda: self._choose_overlay_processes('fps'))
+        self.lbl_fps_game_processes = QLabel(self._process_summary(
+            getattr(cfg, 'fps_game_processes', [])))
+        fps_process_row = QWidget()
+        fps_process_layout = QHBoxLayout(fps_process_row)
+        fps_process_layout.setContentsMargins(0, 0, 0, 0)
+        fps_process_layout.addWidget(self.lbl_fps_game_processes, 1)
+        fps_process_layout.addWidget(self.btn_fps_game_processes)
+        self.btn_clear_fps_game_processes = QPushButton('清除')
+        self.btn_clear_fps_game_processes.setToolTip('清除已选的 FPS 数值目标程序')
+        self.btn_clear_fps_game_processes.clicked.connect(
+            lambda: self._clear_overlay_processes('fps'))
+        fps_process_layout.addWidget(self.btn_clear_fps_game_processes)
+        c_main.addWidget(_setting_row('FPS 数值目标程序', '多选进程；清空后按任意活跃 3D 程序判断', '⌕', fps_process_row))
+        self.btn_fps_game_processes.setEnabled(bool(getattr(cfg, 'fps_game_only', False)))
+        self.btn_clear_fps_game_processes.setEnabled(bool(getattr(cfg, 'fps_game_only', False)))
+
+        preset_bar = QWidget()
+        pb_h = QHBoxLayout(preset_bar)
+        pb_h.setContentsMargins(0, 0, 0, 0)
+        pb_h.setSpacing(8)
+        for btn_txt, style_cfg in (
+            ('N卡经典半透', {'preset': 'top_right', 'layout': 'linear', 'opacity': 55, 'color': 'green', 'size': 'normal'}),
+            ('纯净透明描边', {'preset': 'top_right', 'layout': 'linear', 'opacity': 0, 'color': 'white', 'size': 'normal'}),
+            ('紧凑双列仪表', {'preset': 'top_left', 'layout': 'dual', 'opacity': 65, 'color': 'white', 'size': 'normal'}),
+        ):
+            b_st = QPushButton(btn_txt)
+            b_st.setCursor(Qt.PointingHandCursor)
+            b_st.clicked.connect(lambda _=False, sc=style_cfg: self._apply_ov_style_preset(sc))
+            pb_h.addWidget(b_st)
+        c_main.addWidget(_setting_row('一键样式预设', '快速套用经典浮窗风格，下方可继续微调', '🎨', preset_bar))
+
+        ov_note = QLabel(
+            '💡 覆盖边界说明：本浮窗采用系统级透明置顶穿透层（零进程注入、不触发反作弊封号），'
+            '完美覆盖桌面与「无边框窗口化」游戏；若游戏处于「全屏独占 (Exclusive Fullscreen)」模式看不到浮窗，'
+            '请在游戏画面设置中切换为「无边框窗口」。FPS 采集基于 Intel PresentMon (ETW 事件，需管理员权限，'
+            '部分带强反作弊的游戏可能拦截 ETW)。')
+        ov_note.setObjectName('CardHint')
+        ov_note.setWordWrap(True)
+        c_main.addWidget(ov_note)
+        ov_lay.addWidget(card_main)
+
+        # 卡片 2: 浮窗信息设置 (严格对齐 N 卡截图 7 项)
+        card_cfg, _, c_cfg = _card('浮窗信息设置', '对齐 NVIDIA 统计数据浮窗设置：位置 / 布局 / 背景不透明度 / 字体')
+
+        self._ov_presets = [
+            ('左上', 'top_left'),
+            ('右上', 'top_right'),
+            ('左下', 'bottom_left'),
+            ('右下', 'bottom_right'),
+            ('自定义', 'custom'),
+        ]
+        self.cmb_ov_preset = QComboBox()
+        for txt, val in self._ov_presets:
+            self.cmb_ov_preset.addItem(txt, val)
+        cur_preset = getattr(cfg, 'overlay_preset', 'top_right')
+        self.cmb_ov_preset.setCurrentIndex(max(0, self.cmb_ov_preset.findData(cur_preset)))
+        self.cmb_ov_preset.currentIndexChanged.connect(self._ov_preset_changed)
+        c_cfg.addWidget(_setting_row('统计数据浮窗', '四角快捷定位或自定义坐标', '📌', self.cmb_ov_preset))
+
+        def _ov_slider_row(title, hint, icon, init_val, on_change):
+            s = QSlider(Qt.Horizontal)
+            s.setRange(0, 100)
+            s.setValue(int(init_val))
+            s.setMinimumWidth(150)
+            lbl = QLabel(str(int(init_val)))
+            lbl.setObjectName('StatVal')
+            lbl.setMinimumWidth(36)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            w = QWidget()
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(10)
+            h.addWidget(s, 1)
+            h.addWidget(lbl)
+            row = _setting_row(title, hint, icon, w)
+            w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            s.valueChanged.connect(lambda v: on_change(v, lbl))
+            return row, s, lbl
+
+        row_x, self.sld_ov_x, self.lbl_ov_x = _ov_slider_row(
+            '横向位置', '0–100 (映射到屏幕左→右边缘)', '↔️',
+            getattr(cfg, 'overlay_x_pct', 100), self._ov_x_changed)
+        c_cfg.addWidget(row_x)
+
+        row_y, self.sld_ov_y, self.lbl_ov_y = _ov_slider_row(
+            '纵向位置', '0–100 (映射到屏幕上→下边缘)', '↕️',
+            getattr(cfg, 'overlay_y_pct', 0), self._ov_y_changed)
+        c_cfg.addWidget(row_y)
+
+        self._ov_layouts = [('线性', 'linear'), ('双列', 'dual'), ('横向条', 'compact')]
+        self.cmb_ov_layout = QComboBox()
+        for txt, val in self._ov_layouts:
+            self.cmb_ov_layout.addItem(txt, val)
+        self.cmb_ov_layout.setCurrentIndex(
+            max(0, self.cmb_ov_layout.findData(getattr(cfg, 'overlay_layout', 'linear'))))
+        self.cmb_ov_layout.currentIndexChanged.connect(self._ov_appearance_changed)
+        c_cfg.addWidget(_setting_row('布局', '线性 (单列上下对齐) / 双列网格 / 横向紧凑条', '📐', self.cmb_ov_layout))
+
+        row_op, self.sld_ov_opacity, self.lbl_ov_opacity = _ov_slider_row(
+            '背景不透明度', '0–100 (0 = 全透明仅文字+深色描边，绝不模糊文字)', '🌗',
+            getattr(cfg, 'overlay_bg_opacity', 50), self._ov_opacity_changed)
+        c_cfg.addWidget(row_op)
+
+        self._ov_sizes = [('小', 'small'), ('标准', 'normal'), ('大', 'large')]
+        self.cmb_ov_size = QComboBox()
+        for txt, val in self._ov_sizes:
+            self.cmb_ov_size.addItem(txt, val)
+        self.cmb_ov_size.setCurrentIndex(
+            max(0, self.cmb_ov_size.findData(getattr(cfg, 'overlay_font_size', 'normal'))))
+        self.cmb_ov_size.currentIndexChanged.connect(self._ov_appearance_changed)
+        c_cfg.addWidget(_setting_row('字体大小', '等宽数字 (tabular-nums) 防跳动', '🔤', self.cmb_ov_size))
+
+        self._ov_colors = [
+            ('白色', 'white'),
+            ('浅灰', 'lightgray'),
+            ('N卡绿', 'green'),
+            ('冰川蓝', 'blue'),
+            ('琥珀橙', 'orange'),
+            ('自定义', 'custom'),
+        ]
+        color_wrap = QWidget()
+        cw_h = QHBoxLayout(color_wrap)
+        cw_h.setContentsMargins(0, 0, 0, 0)
+        cw_h.setSpacing(8)
+        self.cmb_ov_color = QComboBox()
+        for txt, val in self._ov_colors:
+            self.cmb_ov_color.addItem(txt, val)
+        self.cmb_ov_color.setCurrentIndex(
+            max(0, self.cmb_ov_color.findData(getattr(cfg, 'overlay_font_color', 'white'))))
+        self.cmb_ov_color.currentIndexChanged.connect(self._ov_color_changed)
+        self.btn_ov_custom_color = QPushButton('选色…')
+        self.btn_ov_custom_color.setCursor(Qt.PointingHandCursor)
+        self.btn_ov_custom_color.setVisible(getattr(cfg, 'overlay_font_color', 'white') == 'custom')
+        self.btn_ov_custom_color.clicked.connect(self._ov_pick_custom_color)
+        cw_h.addWidget(self.cmb_ov_color)
+        cw_h.addWidget(self.btn_ov_custom_color)
+        c_cfg.addWidget(_setting_row('字体颜色', '自带 1px 深色轮廓与阴影，浅色画面下同样清晰', '🎨', color_wrap))
+        ov_lay.addWidget(card_cfg)
+
+        # 卡片 3: 显示项自选 (10 项独立开关)
+        card_items, _, c_items = _card('显示项自选', '勾选要在性能浮窗中展示的实时指标 (1 Hz 低频刷新，CPU 占用 < 1%)')
+        grid_it = QGridLayout()
+        grid_it.setHorizontalSpacing(18)
+        grid_it.setVerticalSpacing(10)
+        self.chk_ov_items: dict[str, QCheckBox] = {}
+        active_items = set(getattr(cfg, 'overlay_items', None) or [])
+        for idx, (key, _short, full_name, unit_desc) in enumerate(OVERLAY_ITEM_DEFS):
+            chk = QCheckBox(f'{full_name}  ({unit_desc})')
+            chk.setChecked(key in active_items)
+            chk.toggled.connect(lambda _on, k=key: self._ov_item_toggled(k))
+            self.chk_ov_items[key] = chk
+            grid_it.addWidget(chk, idx // 2, idx % 2)
+        c_items.addLayout(grid_it)
+
+        btn_reset_items = QPushButton('恢复默认显示项 (FPS / CPU / GPU / 风扇转速)')
+        btn_reset_items.setCursor(Qt.PointingHandCursor)
+        btn_reset_items.clicked.connect(self._ov_reset_default_items)
+        c_items.addWidget(btn_reset_items)
+        ov_lay.addWidget(card_items)
+        ov_lay.addStretch(1)
+
+        ov = self.ctx.get('overlay')
+        if ov is not None:
+            try:
+                ov.positionChanged.connect(self._on_ov_dragged_pos)
+            except Exception:
+                pass
+            try:
+                ov.metricsUpdated.connect(self._fps_on_metrics)
+            except Exception:
+                pass
+        return ovw
+
+    # ---- FPS 采集诊断 ----
+    def _fps_on_metrics(self, metrics: dict):
+        """每次浮窗 1Hz 采样后刷新采集器状态行 (纯内存读取, 零阻塞)。"""
+        ov = self._overlay_obj()
+        lbl = getattr(self, 'lbl_fps_status', None)
+        if lbl is None or ov is None:
+            return
+        mon = getattr(ov, 'fps_monitor', None)
+        if mon is None:
+            return
+        try:
+            diag = mon.diagnose()
+        except Exception:
+            return
+        fps = (metrics or {}).get('fps')
+        txt = diag['status_text']
+        if fps:
+            low1 = (metrics or {}).get('fps1low')
+            txt = f'{txt} · 当前 {fps} FPS'
+            if low1:
+                txt += f' · 1% 低 {low1}'
+            app = (metrics or {}).get('app')
+            if app:
+                txt += f' · {app}'
+        elif diag['status'] == 'running':
+            txt = f'{txt} · 等待呈现事件 ({diag["frame_rows"]} 帧)'
+        lbl.setText(txt)
+
+    def _fps_run_selftest(self):
+        """后台线程跑 PresentMon 限时采集 (GUI 主线程零阻塞), 结果经信号回填。"""
+        if getattr(self, '_fps_testing', False):
+            return
+        ov = self._overlay_obj()
+        if ov is None:
+            return
+        self._fps_testing = True
+        self.btn_fps_selftest.setEnabled(False)
+        self.btn_fps_selftest.setText('采集中…')
+        self.lbl_fps_test.setVisible(True)
+        self.lbl_fps_test.setText('正在以管理员权限尝试创建 ETW 会话并采集 3 秒…')
+        mon = ov.fps_monitor
+        import threading
+
+        def _bg():
+            try:
+                res = mon.run_self_test(6.0)
+            except Exception as e:
+                res = {'ok': False, 'title': '自检异常', 'detail': repr(e), 'stage': 'exception'}
+            self._fpsSelfTestDone.emit(res)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _fps_on_selftest_done(self, res: dict):
+        self._fps_testing = False
+        btn = getattr(self, 'btn_fps_selftest', None)
+        if btn is not None:
+            btn.setEnabled(True)
+            btn.setText('自检')
+        lbl = getattr(self, 'lbl_fps_test', None)
+        if lbl is None:
+            return
+        mark = '✅' if res.get('ok') else '⚠️'
+        lines = [f'{mark} {res.get("title") or "自检结束"}']
+        if res.get('detail'):
+            lines.append(str(res['detail']))
+        if res.get('stage') == 'no_frames':
+            lines.append('💡 提示：测试时桌面未产生 Present 呈现帧（桌面空闲时属正常）。请在 3D 游戏画面正在渲染时点击「自检」。')
+        elif res.get('stage') == 'events_lost':
+            lines.append('💡 提示：系统 ETW 缓冲溢出。可点击下方的「清理 ETW 冲突…」释放第三方跟踪会话，或关闭 N 卡游戏内覆盖/性能监控。')
+        if res.get('raw'):
+            lines.append('PresentMon 原始输出: ' + str(res['raw']).replace('\n', ' ⏎ ')[:400])
+        lbl.setText('\n'.join(lines))
+        lbl.setVisible(True)
+
+    # ---- 全屏兼容性修复 (关闭游戏「全屏优化」) ----
+    # ---- 关闭系统 MPO (多平面覆盖) ----
+    def _ov_fullscreen_probe(self, quiet: bool = False):
+        """记录「浮窗看不到」那一刻的全部现场, 并抓全屏截图。
+
+        判据设计 (这三条能唯一区分病因):
+        - 截图里**有**浮窗 → 其实显示了, 用户看的不是这一屏
+        - 截图里**没有**浮窗, 但我们的窗口 isVisible 且 Z 序在游戏之上
+          → 游戏在走**独占全屏/独立翻转**, 置顶窗口被合成层绕过 (只能改无边框)
+        - 截图里**没有**浮窗, 且我们的窗口不可见/不在屏内
+          → 浮窗被隐藏或定位跑出屏幕, 是我们的 bug
+
+        `quiet=True` 用于全局热键调用: 不弹模态框 (弹框会把全屏游戏踢出全屏,
+        取证当场失效), 只写日志 + 托盘提示。
+        """
+        import ctypes
+        from ctypes import wintypes
+        from PySide6.QtWidgets import QMessageBox
+        out_dir = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'),
+                               'Brb02Toolbox')
+        os.makedirs(out_dir, exist_ok=True)
+        lines = [f'时间: {time.strftime("%Y-%m-%d %H:%M:%S")}']
+        try:
+            u32 = ctypes.windll.user32
+            ov = self._overlay_obj()
+            ov_hwnd = int(ov.winId()) if ov is not None else 0
+            fg = u32.GetForegroundWindow()
+            pid = wintypes.DWORD(0)
+            u32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+
+            def _desc(tag, h):
+                if not h:
+                    return
+                cls = ctypes.create_unicode_buffer(128)
+                u32.GetClassNameW(h, cls, 128)
+                ttl = ctypes.create_unicode_buffer(128)
+                u32.GetWindowTextW(h, ttl, 128)
+                r = wintypes.RECT()
+                u32.GetWindowRect(h, ctypes.byref(r))
+                band = wintypes.DWORD(0)
+                u32.GetWindowBand(h, ctypes.byref(band))
+                lines.append(
+                    f'{tag}: hwnd={h:#x} cls={cls.value} title={ttl.value[:40]!r} '
+                    f'rect=({r.left},{r.top})-({r.right},{r.bottom}) '
+                    f'visible={bool(u32.IsWindowVisible(h))} '
+                    f'band={band.value} '
+                    f'style={u32.GetWindowLongW(h, -16) & 0xffffffff:#x} '
+                    f'exstyle={u32.GetWindowLongW(h, -20) & 0xffffffff:#x}')
+
+            _desc('前台窗口', fg)
+            _desc('浮窗窗口', ov_hwnd)
+            # Z 序里浮窗是不是在游戏之上
+            order, cur, guard = [], u32.GetTopWindow(None), 0
+            while cur and guard < 400:
+                guard += 1
+                if cur in (ov_hwnd, fg):
+                    order.append(hex(cur))
+                cur = u32.GetWindow(cur, 2)      # GW_HWNDNEXT
+            lines.append(f'Z 序(上→下, 仅这两者): {order}')
+            # 屏幕与浮窗几何
+            if ov is not None:
+                g = ov.frameGeometry()
+                scr = ov.screen().geometry() if ov.screen() else None
+                lines.append(f'浮窗几何={g.getRect()} 屏幕={scr.getRect() if scr else None} '
+                             f'onScreen={bool(scr and scr.intersects(g))}')
+                lines.append(f'放行点击={ov._draggable} 遮挡={getattr(ov, "_occluded", None)} '
+                             f'被谁={getattr(ov, "_occluded_by", "")}')
+                if hasattr(ov, '_query_display_mode'):
+                    dw, dh, df = ov._query_display_mode()
+                    lines.append(f'显示模式={dw}x{dh}@{df}Hz')
+                if hasattr(ov, '_detect_exclusive_fullscreen'):
+                    is_excl, excl_desc = ov._detect_exclusive_fullscreen()
+                    lines.append(f'独占全屏判定={is_excl} 详情={excl_desc}')
+            # 抓屏 (这是最关键的一条证据)
+            try:
+                pm = QApplication.primaryScreen().grabWindow(0)
+                png = os.path.join(out_dir, 'fullscreen_probe.png')
+                pm.save(png)
+                lines.append(f'截图: {png} ({pm.width()}x{pm.height()})')
+            except Exception as e:
+                lines.append(f'截图失败: {e!r}')
+        except Exception as e:
+            lines.append(f'采集异常: {e!r}')
+        path = os.path.join(out_dir, 'fullscreen_probe.txt')
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines) + '\n')
+        except Exception:
+            pass
+        for ln in lines:
+            LOGBUF.write(f'[全屏排障] {ln}')
+        try:
+            QApplication.clipboard().setText('\n'.join(lines))
+            tip = '已复制到剪贴板'
+        except Exception:
+            tip = ''
+        if not quiet:
+            QMessageBox.information(
+                self, '全屏排障快照',
+                f'已保存：\n{path}\n（截图同目录 fullscreen_probe.png）\n{tip}\n\n'
+                '请把这两个文件发回，就能判定是真独占全屏还是别的原因。')
+        return path
+
+    def _ov_clean_etw_sessions(self):
+        """检查并一键停止挤占 ETW 缓冲的第三方跟踪会话 (需管理员权限)。"""
+        from PySide6.QtWidgets import QMessageBox
+        from brb02.fps_monitor import _heavy_sessions, stop_interfering_sessions
+        heavy = _heavy_sessions()
+        if not heavy:
+            QMessageBox.information(
+                self, 'ETW 环境正常',
+                '未发现挤占 ETW 缓冲的第三方跟踪会话。\n\n'
+                '当前 ETW 会话环境干净，PresentMon 可正常使用。')
+            return
+        names_str = '\n'.join(f'· {s}' for s in heavy)
+        ans = QMessageBox.question(
+            self, '发现第三方 ETW 跟踪会话',
+            f'以下会话正在持续捕获系统事件并挤占 ETW 缓冲：\n{names_str}\n\n'
+            '这会导致 PresentMon 发生事件丢弃（0 帧）。\n\n'
+            '是否尝试立即停止这些跟踪会话以释放缓冲？',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if ans != QMessageBox.Yes:
+            return
+        stopped = stop_interfering_sessions()
+        if stopped:
+            QMessageBox.information(
+                self, '清理完成',
+                f'已成功停止以下 ETW 会话：\n' + '\n'.join(f'· {s}' for s in stopped) +
+                '\n\nETW 缓冲已释放，请进入游戏测试或点击「自检」。')
+        else:
+            QMessageBox.warning(
+                self, '清理未生效',
+                '未能停止目标会话。这通常是因为权限不足（需要管理员权限），'
+                '或者对应软件的服务正在自动重建会话。\n'
+                '建议在 NVIDIA App 设置中关闭「性能监控/游戏内覆盖」，或手动关闭对应软件。')
+
+    def _ov_fix_mpo(self):
+        """开关 HKLM\\SOFTWARE\\Microsoft\\Windows\\Dwm\\OverlayTestMode。
+
+        值 5 = 关闭 MPO。全屏游戏会拿到一块**独立硬件平面**直接扫描输出,
+        它位于 DWM 合成层**之上**, 因此任何 WS_EX_TOPMOST + LAYERED 的浮窗
+        (我们的、NVIDIA 的、网易云的歌词) 都会被硬件平面盖掉 —— 而 Z 序 API
+        仍报告"你在最顶层", 这正是日志里一直显示"遮挡解除"却看不见的原因。
+        关掉 MPO 后游戏回落到 DWM 合成, 浮窗即可稳定显示。需重启/注销生效。
+        """
+        from PySide6.QtWidgets import QMessageBox
+        try:
+            import winreg
+            key_path = r'SOFTWARE\Microsoft\Windows\Dwm'
+            cur = None
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0,
+                                    winreg.KEY_READ) as k:
+                    cur = winreg.QueryValueEx(k, 'OverlayTestMode')[0]
+            except FileNotFoundError:
+                cur = None
+            except OSError:
+                cur = None
+            enabled = (cur == 5)
+            if enabled:
+                ans = QMessageBox.question(
+                    self, 'MPO 已禁用',
+                    '当前系统已关闭「多平面覆盖 (MPO)」。\n\n'
+                    '是否恢复启用（撤销本次修改）？\n恢复后重启/注销才生效。',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if ans != QMessageBox.Yes:
+                    return
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0,
+                                    winreg.KEY_SET_VALUE) as k:
+                    winreg.DeleteValue(k, 'OverlayTestMode')
+                LOGBUF.write('[浮窗] 已恢复系统 MPO (删除 OverlayTestMode)')
+                QMessageBox.information(self, '已恢复', '已恢复 MPO。重启或注销后生效。')
+                return
+            ans = QMessageBox.question(
+                self, '关闭系统 MPO',
+                '将写入 HKLM\\SOFTWARE\\Microsoft\\Windows\\Dwm\\OverlayTestMode = 5，'
+                '关闭 Windows 多平面覆盖 (MPO)。\n\n'
+                '· 目的：让全屏游戏回落到 DWM 合成，置顶浮窗才能压在上面\n'
+                '· 代价：部分场景可能有轻微性能/功耗变化\n'
+                '· 需要**重启或注销**后生效，可随时点此按钮撤销\n\n继续？',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if ans != QMessageBox.Yes:
+                return
+            with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, key_path, 0,
+                                    winreg.KEY_SET_VALUE) as k:
+                winreg.SetValueEx(k, 'OverlayTestMode', 0, winreg.REG_DWORD, 5)
+            LOGBUF.write('[浮窗] 已关闭系统 MPO (OverlayTestMode=5), 需重启生效')
+            QMessageBox.information(
+                self, '已关闭 MPO',
+                '已关闭多平面覆盖。请**重启电脑或注销重登**后再进游戏测试。\n\n'
+                '若浮窗恢复显示，就说明之前是被硬件覆盖平面挡住的。')
+        except PermissionError:
+            QMessageBox.warning(self, '需要管理员权限',
+                                '写入 HKLM 需要管理员权限，请以「管理员身份运行」后重试。')
+        except Exception as e:
+            LOGBUF.write(f'[浮窗] MPO 设置失败: {e!r}')
+            QMessageBox.warning(self, '操作失败', f'{e}')
+
+    def _ov_fix_fullscreen_compat(self):
+        """检查/恢复游戏的「全屏优化」标记 (DISABLEDXMAXIMIZEDWINDOWEDMODE)。
+
+        ⚠️ **方向更正 (2026-10-26 真机推翻了我原来的说法)**:
+        这个按钮最初是给游戏**关闭**全屏优化的。但关掉 FSO 会让游戏拿到
+        **真独占全屏** —— DWM 合成被整体绕过, 任何置顶浮窗 (我们的 / NVIDIA 的 /
+        网易云歌词) 都画不上去。也就是说: **关 FSO 与"让浮窗在全屏可见"是反的**。
+
+        正确方向是**开启全屏优化**: Windows 会把游戏的"全屏"请求转成
+        **无边框翻转合成**, DWM 继续合成, 浮窗才有机会压在上面。
+        实现上就是**删掉**该标记。
+
+        真机已经踩到: 本机两个 DeltaForce exe 上都被写上了这个标记 —— 于是
+        「全屏」是真独占, 关掉 MPO 也没用。这正是"MPO 关了还是看不到"的原因。
+        """
+        from PySide6.QtWidgets import QMessageBox
+        key_path = r'Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers'
+        token = 'DISABLEDXMAXIMIZEDWINDOWEDMODE'
+        try:
+            import winreg
+        except Exception as e:
+            QMessageBox.warning(self, '不可用', f'{e}')
+            return
+        hits = []
+        global_off = None
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'System\GameConfigStore',
+                                0, winreg.KEY_READ) as gk:
+                try:
+                    global_off = int(winreg.QueryValueEx(gk, 'GameDVR_FSEBehavior')[0])
+                except OSError:
+                    global_off = None
+        except Exception:
+            global_off = None
+        try:
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0,
+                                    winreg.KEY_READ | winreg.KEY_WRITE) as k:
+                i = 0
+                while True:
+                    try:
+                        name, val, _typ = winreg.EnumValue(k, i)
+                    except OSError:
+                        break
+                    i += 1
+                    if token in str(val or ''):
+                        hits.append((name, str(val)))
+        except Exception as e:
+            LOGBUF.write(f'[浮窗] 读取兼容性标记失败: {e!r}')
+            QMessageBox.warning(self, '读取失败', f'{e}')
+            return
+
+        if not hits and global_off != 2:
+            QMessageBox.information(
+                self, '全屏优化：已开启',
+                '当前的"全屏优化"设置对浮窗是有利的：\n\n'
+                f'· 全局开关 GameDVR_FSEBehavior = {global_off}（0=允许，2=强制独占）\n'
+                '· 没有任何程序被单独关闭全屏优化\n\n'
+                '游戏报"全屏"时 Windows 会把它转成无边框翻转合成，浮窗才有机会显示。\n\n'
+                '如果此时全屏仍看不到浮窗，请用 Ctrl+Alt+F4 在游戏里取证。')
+            return
+
+        # 全局开关 = 2 是更硬的拦路虎: 它对**所有**游戏强制真独占全屏,
+        # 单独清 per-exe 标记也没用。这是本机"清了标记仍然看不到"的真因。
+        if global_off == 2:
+            ans_g = QMessageBox.question(
+                self, '全局「强制独占全屏」已开启',
+                'HKCU\\System\\GameConfigStore\\GameDVR_FSEBehavior = 2，'
+                '这会让**所有**游戏都进入真独占全屏，任何置顶浮窗都无法显示。\n\n'
+                '是否改为 0（允许全屏优化）？\n改完需**完全退出游戏再启动**。',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if ans_g == QMessageBox.Yes:
+                try:
+                    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
+                                            r'System\GameConfigStore', 0,
+                                            winreg.KEY_SET_VALUE) as gk:
+                        winreg.SetValueEx(gk, 'GameDVR_FSEBehavior', 0, winreg.REG_DWORD, 0)
+                    LOGBUF.write('[浮窗] 已把 GameDVR_FSEBehavior 改为 0（允许全屏优化）')
+                except Exception as e:
+                    LOGBUF.write(f'[浮窗] 改写全局 FSE 开关失败: {e!r}')
+                    QMessageBox.warning(self, '改写失败', f'{e}')
+                    return
+
+        if not hits:
+            QMessageBox.information(
+                self, '已处理',
+                '全局开关已恢复为 0。没有仍需清理的 per-exe 标记。\n\n'
+                '请**完全退出游戏再重新启动**，然后进全屏看浮窗。')
+            return
+        lines = '\n'.join(f'· {n}' for n, _v in hits[:8])
+        ans = QMessageBox.question(
+            self, '发现「全屏优化」被关闭',
+            f'以下程序被关闭了「全屏优化」（会让它们进入真独占全屏）：\n{lines}\n\n'
+            '这会让任何置顶浮窗在全屏时**消失**。\n\n'
+            '是否**恢复**（删除该标记，重新开启全屏优化）？\n'
+            '恢复后需**完全退出游戏再启动**。',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if ans != QMessageBox.Yes:
+            return
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0,
+                                winreg.KEY_READ | winreg.KEY_WRITE) as k:
+                for name, val in hits:
+                    tokens = [t for t in val.split() if t and t != '~' and t != token]
+                    if tokens:
+                        winreg.SetValueEx(k, name, 0, winreg.REG_SZ, '~ ' + ' '.join(tokens))
+                    else:
+                        try:
+                            winreg.DeleteValue(k, name)
+                        except OSError:
+                            pass
+            LOGBUF.write(f'[浮窗] 已恢复全屏优化: {[n for n, _ in hits]}')
+            QMessageBox.information(
+                self, '已恢复',
+                '已删除「关闭全屏优化」标记。\n\n'
+                '请**完全退出游戏再重新启动**，然后进游戏看浮窗。\n'
+                '若游戏内仍有「显示模式」选项，选「全屏窗口化 / 无边框」最稳。')
+        except Exception as e:
+            LOGBUF.write(f'[浮窗] 恢复全屏优化失败: {e!r}')
+            QMessageBox.warning(self, '恢复失败', f'{e}')
+
+    def _overlay_obj(self):
+        ov = self.ctx.get('overlay')
+        if ov is not None:
+            return ov
+        main = self.ctx.get('main')
+        return getattr(main, 'overlay', None)
+
+    def sync_overlay_state(self, on: bool):
+        """托盘或快捷键切换浮窗时，同步设置页开关状态。"""
+        if hasattr(self, 'tgl_overlay'):
+            self.tgl_overlay.blockSignals(True)
+            self.tgl_overlay.setChecked(bool(on))
+            self.tgl_overlay.blockSignals(False)
+        if not on and hasattr(self, 'tgl_ov_drag') and self.tgl_ov_drag.isChecked():
+            self.tgl_ov_drag.blockSignals(True)
+            self.tgl_ov_drag.setChecked(False)
+            self.tgl_ov_drag.blockSignals(False)
+
+    def _ov_enabled_toggled(self, on: bool):
+        main = self.ctx.get('main')
+        if main is not None and hasattr(main, 'toggle_overlay'):
+            main.toggle_overlay(bool(on))
+        else:
+            cfg = self.ctx['cfg']
+            cfg.overlay_enabled = bool(on)
+            cfg.save()
+            ov = self._overlay_obj()
+            if ov is not None:
+                ov.set_overlay_enabled(bool(on))
+
+    def _ov_drag_toggled(self, on: bool):
+        ov = self._overlay_obj()
+        if on and not self.ctx['cfg'].overlay_enabled:
+            self.tgl_overlay.setChecked(True)
+            self._ov_enabled_toggled(True)
+        if ov is not None:
+            ov.set_draggable(bool(on))
+
+    @staticmethod
+    def _process_summary(names):
+        names = list(names or [])
+        if not names:
+            return '自动识别所有 3D 程序'
+        if len(names) <= 2:
+            return ', '.join(names)
+        return f'{names[0]}, {names[1]} 等 {len(names)} 个程序'
+
+    def _choose_overlay_processes(self, kind: str):
+        import ctypes
+        import os
+        import subprocess
+        cfg = self.ctx['cfg']
+        attr = 'overlay_game_processes' if kind == 'overlay' else 'fps_game_processes'
+        title = '选择浮窗目标程序' if kind == 'overlay' else '选择 FPS 数值目标程序'
+        current = set(getattr(cfg, attr, []) or [])
+        discovered = {}
+        try:
+            import psutil
+            for proc in psutil.process_iter(['name', 'pid']):
+                try:
+                    name = (proc.info.get('name') or '').strip()
+                    if name and not name.lower() in ('system', 'idle'):
+                        discovered[name.lower()] = name
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except ImportError:
+            try:
+                result = subprocess.run(
+                    ['tasklist', '/FO', 'CSV', '/NH'], capture_output=True,
+                    text=True, encoding='mbcs', errors='replace', timeout=8,
+                    creationflags=0x08000000)
+                import csv
+                for row in csv.reader(result.stdout.splitlines()):
+                    if row and row[0].lower().endswith('.exe'):
+                        discovered[row[0].lower()] = row[0]
+            except Exception:
+                pass
+        for name in current:
+            discovered.setdefault(name.lower(), name)
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(440, 520)
+        layout = QVBoxLayout(dlg)
+        hint = QLabel('勾选一个或多个程序；已选但当前未运行的程序也会保留。')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        listing = QListWidget()
+        for key, display in sorted(discovered.items(), key=lambda kv: kv[1].lower()):
+            item = QListWidgetItem(display)
+            item.setData(Qt.UserRole, key)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if key in current else Qt.Unchecked)
+            listing.addItem(item)
+        layout.addWidget(listing)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        selected = [listing.item(i).data(Qt.UserRole) for i in range(listing.count())
+                    if listing.item(i).checkState() == Qt.Checked]
+        setattr(cfg, attr, selected)
+        cfg.save()
+        if kind == 'overlay':
+            self.lbl_ov_game_processes.setText(self._process_summary(selected))
+        else:
+            self.lbl_fps_game_processes.setText(self._process_summary(selected))
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.reload_from_config()
+
+    def _clear_overlay_processes(self, kind: str):
+        cfg = self.ctx['cfg']
+        attr = 'overlay_game_processes' if kind == 'overlay' else 'fps_game_processes'
+        setattr(cfg, attr, [])
+        cfg.save()
+        if kind == 'overlay':
+            self.lbl_ov_game_processes.setText(self._process_summary([]))
+        else:
+            self.lbl_fps_game_processes.setText(self._process_summary([]))
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.reload_from_config()
+
+    def _ov_game_processes_changed(self):
+        return
+
+    def _ov_game_only_toggled(self, on: bool):
+        cfg = self.ctx['cfg']
+        cfg.overlay_game_only = bool(on)
+        self.btn_ov_game_processes.setEnabled(bool(on))
+        self.btn_clear_ov_game_processes.setEnabled(bool(on))
+        cfg.save()
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.reload_from_config()
+
+    def _fps_game_only_toggled(self, on: bool):
+        cfg = self.ctx['cfg']
+        cfg.fps_game_only = bool(on)
+        self.btn_fps_game_processes.setEnabled(bool(on))
+        self.btn_clear_fps_game_processes.setEnabled(bool(on))
+        cfg.save()
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.reload_from_config()
+
+    def _ov_preset_changed(self, idx: int):
+        from brb02.overlay import PRESET_COORDS
+        cfg = self.ctx['cfg']
+        val = self.cmb_ov_preset.itemData(idx) or 'top_right'
+        cfg.overlay_preset = val
+        if val in PRESET_COORDS:
+            x_pct, y_pct = PRESET_COORDS[val]
+            cfg.overlay_x_pct = x_pct
+            cfg.overlay_y_pct = y_pct
+            self.sld_ov_x.blockSignals(True)
+            self.sld_ov_y.blockSignals(True)
+            self.sld_ov_x.setValue(x_pct)
+            self.sld_ov_y.setValue(y_pct)
+            self.lbl_ov_x.setText(str(x_pct))
+            self.lbl_ov_y.setText(str(y_pct))
+            self.sld_ov_x.blockSignals(False)
+            self.sld_ov_y.blockSignals(False)
+        cfg.save()
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.reload_from_config()
+
+    def _ov_x_changed(self, val: int, lbl: QLabel):
+        lbl.setText(str(int(val)))
+        cfg = self.ctx['cfg']
+        cfg.overlay_x_pct = int(val)
+        cfg.overlay_preset = 'custom'
+        idx = self.cmb_ov_preset.findData('custom')
+        if idx >= 0 and self.cmb_ov_preset.currentIndex() != idx:
+            self.cmb_ov_preset.blockSignals(True)
+            self.cmb_ov_preset.setCurrentIndex(idx)
+            self.cmb_ov_preset.blockSignals(False)
+        cfg.save()
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.apply_position()
+
+    def _ov_y_changed(self, val: int, lbl: QLabel):
+        lbl.setText(str(int(val)))
+        cfg = self.ctx['cfg']
+        cfg.overlay_y_pct = int(val)
+        cfg.overlay_preset = 'custom'
+        idx = self.cmb_ov_preset.findData('custom')
+        if idx >= 0 and self.cmb_ov_preset.currentIndex() != idx:
+            self.cmb_ov_preset.blockSignals(True)
+            self.cmb_ov_preset.setCurrentIndex(idx)
+            self.cmb_ov_preset.blockSignals(False)
+        cfg.save()
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.apply_position()
+
+    def _on_ov_dragged_pos(self, x_pct: int, y_pct: int, preset: str):
+        self.sld_ov_x.blockSignals(True)
+        self.sld_ov_y.blockSignals(True)
+        self.sld_ov_x.setValue(int(x_pct))
+        self.sld_ov_y.setValue(int(y_pct))
+        self.lbl_ov_x.setText(str(int(x_pct)))
+        self.lbl_ov_y.setText(str(int(y_pct)))
+        self.sld_ov_x.blockSignals(False)
+        self.sld_ov_y.blockSignals(False)
+        idx = self.cmb_ov_preset.findData(preset)
+        if idx >= 0:
+            self.cmb_ov_preset.blockSignals(True)
+            self.cmb_ov_preset.setCurrentIndex(idx)
+            self.cmb_ov_preset.blockSignals(False)
+
+    def _ov_opacity_changed(self, val: int, lbl: QLabel):
+        lbl.setText(str(int(val)))
+        cfg = self.ctx['cfg']
+        cfg.overlay_bg_opacity = int(val)
+        cfg.save()
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.update()
+
+    def _ov_appearance_changed(self, *_):
+        cfg = self.ctx['cfg']
+        cfg.overlay_layout = self.cmb_ov_layout.currentData() or 'linear'
+        cfg.overlay_font_size = self.cmb_ov_size.currentData() or 'normal'
+        cfg.save()
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.reload_from_config()
+
+    def _ov_color_changed(self, *_):
+        cfg = self.ctx['cfg']
+        c_val = self.cmb_ov_color.currentData() or 'white'
+        cfg.overlay_font_color = c_val
+        self.btn_ov_custom_color.setVisible(c_val == 'custom')
+        cfg.save()
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.reload_from_config()
+
+    def _ov_pick_custom_color(self):
+        from PySide6.QtWidgets import QColorDialog
+        cfg = self.ctx['cfg']
+        init_c = QColor(getattr(cfg, 'overlay_custom_color', '#00ffcc'))
+        col = QColorDialog.getColor(init_c, self, '选择浮窗字体颜色')
+        if col.isValid():
+            cfg.overlay_custom_color = col.name()
+            cfg.overlay_font_color = 'custom'
+            cfg.save()
+            ov = self._overlay_obj()
+            if ov is not None:
+                ov.reload_from_config()
+
+    def _apply_ov_style_preset(self, sc: dict):
+        from brb02.overlay import PRESET_COORDS
+        cfg = self.ctx['cfg']
+        preset = sc.get('preset', 'top_right')
+        cfg.overlay_preset = preset
+        if preset in PRESET_COORDS:
+            cfg.overlay_x_pct, cfg.overlay_y_pct = PRESET_COORDS[preset]
+        cfg.overlay_layout = sc.get('layout', 'linear')
+        cfg.overlay_bg_opacity = int(sc.get('opacity', 50))
+        cfg.overlay_font_color = sc.get('color', 'white')
+        cfg.overlay_font_size = sc.get('size', 'normal')
+        cfg.save()
+
+        # 回填 UI 控件
+        for cmb, val in (
+            (self.cmb_ov_preset, cfg.overlay_preset),
+            (self.cmb_ov_layout, cfg.overlay_layout),
+            (self.cmb_ov_size, cfg.overlay_font_size),
+            (self.cmb_ov_color, cfg.overlay_font_color),
+        ):
+            idx = cmb.findData(val)
+            if idx >= 0:
+                cmb.blockSignals(True)
+                cmb.setCurrentIndex(idx)
+                cmb.blockSignals(False)
+        self.btn_ov_custom_color.setVisible(cfg.overlay_font_color == 'custom')
+        for sld, lbl, v in (
+            (self.sld_ov_x, self.lbl_ov_x, cfg.overlay_x_pct),
+            (self.sld_ov_y, self.lbl_ov_y, cfg.overlay_y_pct),
+            (self.sld_ov_opacity, self.lbl_ov_opacity, cfg.overlay_bg_opacity),
+        ):
+            sld.blockSignals(True)
+            sld.setValue(int(v))
+            lbl.setText(str(int(v)))
+            sld.blockSignals(False)
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.reload_from_config()
+
+    def _ov_item_toggled(self, _key: str):
+        from brb02.config import ALL_OVERLAY_ITEMS
+        cfg = self.ctx['cfg']
+        selected = [k for k in ALL_OVERLAY_ITEMS if k in self.chk_ov_items and self.chk_ov_items[k].isChecked()]
+        cfg.overlay_items = selected
+        cfg.save()
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.reload_from_config()
+
+    def _ov_reset_default_items(self):
+        from brb02.config import DEFAULT_OVERLAY_ITEMS
+        cfg = self.ctx['cfg']
+        cfg.overlay_items = list(DEFAULT_OVERLAY_ITEMS)
+        cfg.save()
+        for k, chk in self.chk_ov_items.items():
+            chk.blockSignals(True)
+            chk.setChecked(k in cfg.overlay_items)
+            chk.blockSignals(False)
+        ov = self._overlay_obj()
+        if ov is not None:
+            ov.reload_from_config()
+
 
 # ================= 设备页 =================
 class DevicePage(QWidget):
@@ -3075,8 +4114,43 @@ class AboutPage(QWidget):
             return
         try:
             from brb02.diagnostics import export_diagnostics
+            extra = {}
+            main = self.ctx.get('main')
+            ov = getattr(main, 'overlay', None) or self.ctx.get('overlay')
+            if ov is not None:
+                mon = getattr(ov, 'fps_monitor', None)
+                if mon is not None:
+                    try:
+                        d = mon.diagnose()
+                        extra['fpsMonitor'] = {k: v for k, v in d.items() if k != 'command'}
+                        extra['fpsMonitorCommand'] = ' '.join(d.get('command') or [])
+                    except Exception as e:
+                        extra['fpsMonitor'] = {'error': repr(e)}
+                cfg_d = self.ctx['cfg']
+                try:
+                    extra['overlay'] = {
+                        'enabled': bool(getattr(cfg_d, 'overlay_enabled', False)),
+                        'visible': bool(ov.isVisible()),
+                        'geometry': [ov.x(), ov.y(), ov.width(), ov.height()],
+                        'screen': list(ov.screen().geometry().getRect()) if ov.screen() else None,
+                        'dpr': ov.devicePixelRatioF(),
+                        'gameOnly': bool(getattr(cfg_d, 'overlay_game_only', False)),
+                        'layout': getattr(cfg_d, 'overlay_layout', ''),
+                        'occluded': bool(getattr(ov, '_occluded', False)),
+                        'occludedBy': getattr(ov, '_occluded_by', ''),
+                        # 2026-10-28: 把浮窗**实际算出来的行和值**一起带走 ——
+                        # 用户反馈"风扇转速不显示"时, 靠这个就能分清是取数错还是绘制/裁剪错。
+                        'rows': list(getattr(ov, '_rows', []) or []),
+                        'metrics': {k: v for k, v in (getattr(ov, '_metrics', {}) or {}).items()
+                                    if k in ('fps', 'fps1low', 'cpu_load', 'cpu_temp',
+                                             'gpu_load', 'gpu_temp', 'fan_rpm', 'ram_pct')},
+                        'fontSize': getattr(cfg_d, 'overlay_font_size', ''),
+                        'fontColor': getattr(cfg_d, 'overlay_font_color', ''),
+                    }
+                except Exception as e:
+                    extra['overlay'] = {'error': repr(e)}
             out = export_diagnostics(self.ctx['cfg'], self.ctx['worker'],
-                                     LOGBUF.text(), path)
+                                     LOGBUF.text(), path, extra=extra)
             LOGBUF.write(f'[诊断] 已导出: {out}')
         except Exception as e:
             LOGBUF.write(f'[诊断] 导出失败: {e!r}')

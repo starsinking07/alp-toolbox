@@ -1,0 +1,16 @@
+Modified Intel PresentMon binary
+
+The bundled PresentMon.exe is modified from Intel PresentMon HEAD ef495aee.
+Original copyright and MIT license text are in PresentMon-LICENSE.txt.
+
+Modifications:
+- Set ETW BufferSize to 256 KB, MinimumBuffers to 64, MaximumBuffers to 256.
+- Bypass the conditional fflush skip in --output_file mode.
+
+Patch source: tools/patch_presentmon.py in the Alp Toolbox source repository.
+Original SHA256:
+C7E7420AD7F5EE40E7A41EFCAAA9EA213F6F9954858CA46DA4DF97F50E0302F3
+Modified SHA256:
+226847B84157A168DC0CDDD6CFE7CEF2C04128B2DD333205C37B141AF8E0BF4F
+
+The binary patch does not establish game or anti-cheat compatibility.

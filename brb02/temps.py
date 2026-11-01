@@ -91,11 +91,13 @@ class TempReader:
         self.pawnio_version = _pawnio_version()
         self.lhm_version = ''
         self.lhm_error = ''
-        # 负载体 (0.1.8 参数页): CPU/GPU 负载% / 内存占用% / 磁盘活动%
+        # 负载体 (0.1.8 参数页 + 0.2.1 性能浮窗): CPU/GPU 负载% / 内存 / 显存 / 磁盘活动%
         self.cpu_load: float | None = None
         self.gpu_load: float | None = None
         self.ram_used: float | None = None
         self.disk_active: float | None = None
+        self.vram_used_gb: float | None = None
+        self.vram_total_gb: float | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._t: Optional[threading.Thread] = None
@@ -159,7 +161,21 @@ class TempReader:
     def _loop(self):
         from .logbuf import LOGBUF
         t_start = time.time()
-        import clr
+        # 冻结包常见坑: pythonnet 的 netfx loader 找不到/加载不了 Python.Runtime.dll。
+        # 失败时把关键文件是否存在一并写进 lhm_error, 让诊断包能直接定位。
+        try:
+            import clr
+        except Exception as e:
+            import sys as _sys
+            base = getattr(_sys, '_MEIPASS', None)
+            probes = []
+            if base:
+                probes.append(os.path.join(base, 'pythonnet', 'runtime', 'Python.Runtime.dll'))
+            probes.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       '..', 'pythonnet', 'runtime', 'Python.Runtime.dll'))
+            detail = ', '.join(f'{os.path.basename(p)}={"有" if os.path.isfile(p) else "缺"}'
+                               for p in probes)
+            raise RuntimeError(f'{type(e).__name__}: {e} | 运行库探测: {detail}')
         try:
             os.add_dll_directory(self._lhm_dir)
         except Exception:
@@ -337,9 +353,10 @@ class TempReader:
         return temp, hotspot, power
 
     def _scan_extra(self, computer):
-        """负载体 (0.1.8 参数页): 返回 (CPU负载%, GPU负载%, 内存占用%, 磁盘活动%)。
-        任一项读不到为 None。LHM SensorType: Load / Data。"""
+        """负载体 (0.1.8 参数页 + 0.2.1 浮窗): 返回 (CPU负载%, GPU负载%, 内存占用%, 磁盘活动%)。
+        同时更新显存用量 (vram_used_gb / vram_total_gb, 独显优先)。"""
         cpu_l = gpu_l = ram_u = disk_a = None
+        vram_cands = []   # (prio, total_mb, used_mb)
         for hw in computer.Hardware:
             ht = str(hw.HardwareType)
             if 'Cpu' in ht:
@@ -352,8 +369,14 @@ class TempReader:
                             except (TypeError, ValueError):
                                 pass
             elif 'Gpu' in ht:
+                hw_name = str(hw.Name).lower()
+                prio = 0 if ('nvidia' in hw_name or 'geforce' in hw_name or 'rtx' in hw_name or 'gtx' in hw_name) else (
+                    1 if ('radeon' in hw_name or 'amd' in hw_name) else 2)
+                g_used_mb = None
+                g_total_mb = None
                 for s in hw.Sensors:
-                    if str(s.SensorType) == 'Load' and s.Value is not None:
+                    st = str(s.SensorType)
+                    if st == 'Load' and s.Value is not None:
                         n = str(s.Name).lower()
                         if 'core' in n or 'gpu total' in n or n == 'load':
                             try:
@@ -361,6 +384,20 @@ class TempReader:
                                 gpu_l = v if gpu_l is None else max(gpu_l, v)
                             except (TypeError, ValueError):
                                 pass
+                    elif st == 'SmallData' and s.Value is not None:
+                        n = str(s.Name).lower()
+                        try:
+                            v = float(s.Value)
+                        except (TypeError, ValueError):
+                            continue
+                        if v <= 0:
+                            continue
+                        if n == 'gpu memory used' or (g_used_mb is None and 'dedicated memory used' in n):
+                            g_used_mb = v
+                        elif n == 'gpu memory total' or (g_total_mb is None and 'dedicated memory total' in n):
+                            g_total_mb = v
+                if g_used_mb is not None or g_total_mb is not None:
+                    vram_cands.append((prio, -(g_total_mb or 0.0), g_used_mb, g_total_mb))
             elif 'Storage' in ht:
                 for s in hw.Sensors:
                     if str(s.SensorType) == 'Load' and s.Value is not None:
@@ -369,6 +406,12 @@ class TempReader:
                             disk_a = v if disk_a is None else max(disk_a, v)
                         except (TypeError, ValueError):
                             pass
+        if vram_cands:
+            vram_cands.sort(key=lambda x: (x[0], x[1]))
+            _, _, u_mb, t_mb = vram_cands[0]
+            with self._lock:
+                self.vram_used_gb = round(u_mb / 1024.0, 1) if u_mb is not None else None
+                self.vram_total_gb = round(t_mb / 1024.0, 1) if t_mb is not None else None
         return cpu_l, gpu_l, ram_u, disk_a
 
     @staticmethod
@@ -388,8 +431,9 @@ class TempReader:
         return None
 
     @staticmethod
-    def _ram_percent() -> float | None:
-        """内存占用% (ctypes GlobalMemoryStatusEx, 零依赖)。"""
+    def _ram_info() -> tuple[float | None, float | None, float | None]:
+        """物理内存状态 (ctypes GlobalMemoryStatusEx, 零依赖):
+        返回 (占用百分比, 已用GB, 总量GB)。"""
         import ctypes
 
         class MEMORYSTATUSEX(ctypes.Structure):
@@ -402,17 +446,30 @@ class TempReader:
             st = MEMORYSTATUSEX()
             st.dwLength = ctypes.sizeof(st)
             if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
-                return float(st.dwMemoryLoad)
+                pct = float(st.dwMemoryLoad)
+                tot_gb = round(st.ullTotalPhys / (1024.0 ** 3), 1)
+                used_gb = round((st.ullTotalPhys - st.ullAvailPhys) / (1024.0 ** 3), 1)
+                return pct, used_gb, tot_gb
         except Exception:
             pass
-        return None
+        return None, None, None
+
+    @staticmethod
+    def _ram_percent() -> float | None:
+        """内存占用% (ctypes GlobalMemoryStatusEx, 零依赖)。"""
+        pct, _, _ = TempReader._ram_info()
+        return pct
 
     def load_snapshot(self) -> dict:
-        """负载体快照 (0.1.8 参数页): {'cpu_load','gpu_load','ram','disk'}, 无读数为 None。
-        内存走 GlobalMemoryStatusEx (零依赖); CPU/GPU 负载与磁盘活动走 LHM (需管理员)。"""
+        """负载体快照 (0.1.8 参数页 + 0.2.1 性能浮窗):
+        {'cpu_load','gpu_load','ram','ram_used_gb','ram_total_gb','vram_used_gb','vram_total_gb','disk','disk_active'}。
+        内存走 GlobalMemoryStatusEx (零依赖); CPU/GPU 负载与显存/磁盘活动走 LHM。"""
+        pct, used_gb, tot_gb = self._ram_info()
         with self._lock:
             return {'cpu_load': self.cpu_load, 'gpu_load': self.gpu_load,
-                    'ram': self._ram_percent(), 'disk': self._disk_percent(),
+                    'ram': pct, 'ram_used_gb': used_gb, 'ram_total_gb': tot_gb,
+                    'vram_used_gb': self.vram_used_gb, 'vram_total_gb': self.vram_total_gb,
+                    'disk': self._disk_percent(),
                     'disk_active': self.disk_active}
 
     def _scan_cpu_power(self, computer) -> float | None:

@@ -117,8 +117,14 @@ def _run(page):
     _ensure_admin()        # 提权最先做: 提权重启的新实例不能撞见旧实例的单实例管道
 
     # 运行日志: stderr 分流 (异常 traceback 进关于页日志, 可复制)
+    # 0.2.1: 同时落盘到 %APPDATA%\Brb02Toolbox\app.log —— 打包后没有控制台,
+    # 用户反馈"某个功能不工作"时, 这个文件就是唯一的一手现场。
     from brb02.logbuf import LOGBUF
+    LOGBUF.enable_file()
     LOGBUF.write(f'{APP_NAME} 启动')
+    LOGBUF.write(f'[环境] frozen={getattr(sys, "frozen", False)} '
+                 f'admin={bool(__import__("ctypes").windll.shell32.IsUserAnAdmin())} '
+                 f'dpr={app.primaryScreen().devicePixelRatio() if app.primaryScreen() else "?"}')
     LOGBUF.install_stderr_tee()
 
     # 单实例守卫 (两段式): 托盘驻留时再双击 exe → 唤醒已有窗口后退出。

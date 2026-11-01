@@ -4,6 +4,7 @@
 默认组合:
   Ctrl+Alt+F1  循环切换挡位
   Ctrl+Alt+F2  开关智能变频
+  Ctrl+Alt+F3  开关性能浮窗
 """
 from __future__ import annotations
 
@@ -22,10 +23,16 @@ WM_HOTKEY = 0x0312
 
 HK_CYCLE_GEAR = 1
 HK_TOGGLE_SMART = 2
+HK_TOGGLE_OVERLAY = 3
+HK_PROBE_FULLSCREEN = 4
 
 BINDINGS = [
     (HK_CYCLE_GEAR, MOD_CONTROL | MOD_ALT, 0x70, 'Ctrl+Alt+F1', '循环切换挡位'),
     (HK_TOGGLE_SMART, MOD_CONTROL | MOD_ALT, 0x71, 'Ctrl+Alt+F2', '开关智能变频'),
+    (HK_TOGGLE_OVERLAY, MOD_CONTROL | MOD_ALT, 0x72, 'Ctrl+Alt+F3', '开关性能浮窗'),
+    # 全屏排障取证必须走全局热键: 点设置页按钮会把工具箱切到前台,
+    # 前台一变游戏可能立刻退出全屏 —— 那样永远取不到出问题的现场。
+    (HK_PROBE_FULLSCREEN, MOD_CONTROL | MOD_ALT, 0x73, 'Ctrl+Alt+F4', '全屏排障快照'),
 ]
 
 

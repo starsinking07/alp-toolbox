@@ -47,8 +47,17 @@ def parse_version(tag: str) -> tuple[int, ...]:
 
 
 def is_newer(latest: str, current: str) -> bool:
-    """逐段比较, 'v0.1.10' > 'v0.1.9' → True。"""
-    return parse_version(latest) > parse_version(current)
+    """Compare numeric release and prerelease order; build metadata is ignored."""
+    def key(tag):
+        numbers = list(parse_version(tag))
+        while len(numbers) > 1 and numbers[-1] == 0:
+            numbers.pop()
+        text = (tag or '').strip().lstrip('vV').split('+', 1)[0]
+        _head, separator, suffix = text.partition('-')
+        identifiers = tuple((0, int(part)) if part.isdigit() else (1, part.lower())
+                            for part in suffix.split('.')) if separator else ()
+        return tuple(numbers), (0 if separator else 1), identifiers
+    return key(latest) > key(current)
 
 
 def setup_asset_name(version: str) -> str:
@@ -436,8 +445,12 @@ class AssetDownloader(QObject):
         if f is not None:
             try:
                 f.close()
-            except OSError:
-                pass
+            except OSError as exc:
+                if not self._failed:
+                    self._failed = True
+                    self._remove_partial()
+                    self.fail.emit(f'保存安装包失败: {exc}')
+                return
         if self._failed:                     # 写盘失败/看门狗路径已发过 fail, 这里只做清理
             return
         if err is not None and err != QNetworkReply.NoError:

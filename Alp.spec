@@ -19,6 +19,11 @@ datas = [
 PAWNIO_SETUP = os.path.join(ROOT, 'installer', 'pawnio', 'PawnIO_setup.exe')
 if os.path.isfile(PAWNIO_SETUP):
     datas.append((PAWNIO_SETUP, 'assets'))
+# PresentMon (0.2.1 性能浮窗 FPS 采集, Intel MIT 开源) 随包分发
+for _pm_fn in ('PresentMon.exe', 'PresentMon-LICENSE.txt', 'PresentMon-NOTICE.txt'):
+    _pm_p = os.path.join(ROOT, 'assets', _pm_fn)
+    if os.path.isfile(_pm_p):
+        datas.append((_pm_p, 'assets'))
 binaries = []
 if os.path.isfile(LHM_DLL):
     # 0.9.6 起 LHM 改用 PawnIO 驱动, 并新增 System.Memory / DiskInfoToolkit /

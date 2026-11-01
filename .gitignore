@@ -21,7 +21,9 @@ insns_cache.pkl
 exe_insns.pkl
 
 # 逆向工作目录 (含本机绝对路径, 不公开)
-tools/
+tools/*
+!tools/patch_presentmon.py
+!tools/test_beta_regressions.py
 
 # 内部文档
 HANDOFF.md

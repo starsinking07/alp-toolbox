@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import os
+import sys
+import threading
+import time
 from PySide6.QtCore import (QAbstractAnimation, QPoint, QPropertyAnimation,
-                            QRect, QSize, Qt, QTimer, QVariantAnimation)
+                            QRect, QSize, Qt, QTimer, QVariantAnimation, Signal)
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton,
     QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
-from brb02.hotkeys import HK_CYCLE_GEAR, HK_TOGGLE_SMART, HotkeyManager
+from brb02.hotkeys import (HK_CYCLE_GEAR, HK_PROBE_FULLSCREEN, HK_TOGGLE_OVERLAY,
+                           HK_TOGGLE_SMART, HotkeyManager)
 from brb02.logbuf import LOGBUF
+from brb02.overlay import PerformanceOverlay
 
 from .theme import build_palette, build_qss, temp_color
 from . import motion
@@ -313,6 +318,9 @@ class Sidebar(QWidget):
 
 
 class MainWindow(QMainWindow):
+    # 2026-10-28: 风扇曲线一改就广播, 让状态页那张「风扇速度曲线」卡片立刻跟上,
+    # 而不是等下一次状态刷新 (原来最多差一拍, 用户感知为"同步有延迟")。
+    curveChanged = Signal()
     def __init__(self, cfg, worker):
         super().__init__()
         self.cfg = cfg
@@ -364,8 +372,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(shell)
 
         # 页面 + 滚动容器 (切换时用 wrapper 查找!)
+        self.overlay = PerformanceOverlay(cfg, worker)
         self.ctx = {'cfg': cfg, 'worker': worker, 'main': self, 'dark': cfg.dark,
-                    'theme': self.theme_tokens()}
+                    'theme': self.theme_tokens(), 'overlay': self.overlay}
         self.pages = {
             'status': StatusPage(self.ctx),
             'curve': CurvePage(self.ctx),
@@ -423,6 +432,19 @@ class MainWindow(QMainWindow):
         menu.addAction(a_follow)
         menu.addSeparator()
 
+        # 性能浮窗 (0.2.1): 类 NVIDIA 统计浮层, 托盘一键开关 + Ctrl+Alt+F3 全局快捷键
+        a_overlay = QAction('性能浮窗 (Ctrl+Alt+F3)', self)
+        a_overlay.setCheckable(True)
+        a_overlay.setChecked(bool(cfg.overlay_enabled))
+        a_overlay.toggled.connect(self.toggle_overlay)
+        menu.addAction(a_overlay)
+
+        # FPS 采集 (PresentMon/ETW) 需要管理员权限; 非管理员时给出可执行的一键入口
+        a_elevate = QAction('以管理员身份重启 (开启 FPS 采集)', self)
+        a_elevate.triggered.connect(self.relaunch_as_admin)
+        menu.addAction(a_elevate)
+        menu.addSeparator()
+
         # 流畅优先 (2026-10-25): perf_log 判读 —— 该机器对窗口光栅路径极慢,
         # 任何动画帧都 60-300ms。此开关一键把全部动效退化为瞬时 (motion._REDUCED
         # 即全部 duration()=0 的既有通道), 切换/交错/hover/仪表追赶全部零成本。
@@ -443,7 +465,22 @@ class MainWindow(QMainWindow):
         self._tray_curve_action = a_curve
         self._tray_tec_action = a_tec
         self._tray_follow_action = a_follow
+        self._tray_overlay_action = a_overlay
+        self.overlay.enabledChanged.connect(self._sync_overlay_ui)
+        try:
+            self.overlay.metricsUpdated.connect(self._on_overlay_metrics)
+        except Exception:
+            pass
+        try:
+            self.overlay.occlusionChanged.connect(self._on_overlay_occlusion)
+            self.overlay.exclusiveFullscreenChanged.connect(self._on_exclusive_fullscreen_changed)
+        except Exception:
+            pass
+        self._fps_admin_hint_shown = False
+        QTimer.singleShot(4000, self._fps_startup_verify)
         self.tray.show()
+        if cfg.overlay_enabled:
+            QTimer.singleShot(150, lambda: self.overlay.set_overlay_enabled(True, persist=False))
 
         self._tray_timer = QTimer(self)
         self._tray_timer.timeout.connect(self._update_tray_info)
@@ -625,6 +662,242 @@ class MainWindow(QMainWindow):
         elif hk_id == HK_TOGGLE_SMART:
             # 快捷键切智能变频也走互斥入口 (会自动关掉按键控制/档位自动切换)
             self.set_exclusive_mode('manual' if self.cfg.curve_enabled else 'curve')
+        elif hk_id == HK_TOGGLE_OVERLAY:
+            self.toggle_overlay(not bool(self.cfg.overlay_enabled))
+        elif hk_id == HK_PROBE_FULLSCREEN:
+            # 在游戏里直接按 Ctrl+Alt+F4 取证 —— 不切前台, 现场才不会被破坏。
+            try:
+                ctrl = self.pages.get('control')
+                fn = getattr(ctrl, '_ov_fullscreen_probe', None)
+                if fn is not None:
+                    self.tray.showMessage('全屏排障快照', '已记录现场并抓屏',
+                                          QSystemTrayIcon.Information, 2000)
+                    fn(quiet=True)
+            except Exception as e:
+                LOGBUF.write(f'[全屏排障] 热键取证失败: {e!r}')
+
+    def toggle_overlay(self, on: bool):
+        """切换性能浮窗开关 (托盘 / 快捷键 / 设置页共用入口, 绝不抢夺前台游戏焦点)。"""
+        on = bool(on)
+        self.overlay.set_overlay_enabled(on, persist=True)
+        self._sync_overlay_ui(on)
+        LOGBUF.write(f'[浮窗] 性能浮窗 = {"开启" if on else "关闭"}')
+
+    def _sync_overlay_ui(self, on: bool):
+        act = getattr(self, '_tray_overlay_action', None)
+        if act is not None:
+            act.blockSignals(True)
+            act.setChecked(bool(on))
+            act.blockSignals(False)
+        ctrl = self.pages.get('control')
+        if ctrl is not None and hasattr(ctrl, 'sync_overlay_state'):
+            try:
+                ctrl.sync_overlay_state(bool(on))
+            except Exception:
+                pass
+
+    # ---- FPS 采集权限 ----
+    def _fps_startup_verify(self):
+        """启动 4s 后自动跑一次 PresentMon 限时自检, 把结论写进 app.log。
+
+        目的: 用户不需要点任何按钮, 只要启动过一次, 日志里就有一份完整的
+        「FPS 采集为什么不行」的判定 —— 排障不再依赖用户手动复现。
+        """
+        ov = getattr(self, 'overlay', None)
+        mon = getattr(ov, 'fps_monitor', None) if ov is not None else None
+        if mon is None:
+            return
+        cfg = getattr(self, 'cfg', None)
+        if cfg is None or not getattr(cfg, 'overlay_enabled', False) \
+                or 'fps' not in (getattr(cfg, 'overlay_items', None) or []):
+            LOGBUF.write('[浮窗] 启动自检跳过: 浮窗未启用或未勾选 FPS 项')
+            return
+        LOGBUF.write('[浮窗] 启动自检开始: PresentMon 6s 限时采集 '
+                     '(含 ~2s ETW 建会话固定开销)')
+
+        def _work():
+            try:
+                r = mon.run_self_test(6.0)
+                LOGBUF.write(
+                    f'[浮窗] 启动自检结果: ok={r.get("ok")} stage={r.get("stage")} '
+                    f'title={r.get("title")}')
+                if r.get('detail'):
+                    LOGBUF.write(f'[浮窗] 自检详情: {r.get("detail")}')
+                if r.get('raw'):
+                    LOGBUF.write('[浮窗] 自检原始输出: '
+                                 + str(r['raw']).replace('\n', ' ⏎ ')[:600])
+                # 同步落一份单文件结论, 用户只需发这一个 txt
+                try:
+                    d = os.environ.get('APPDATA') or os.path.expanduser('~')
+                    p = os.path.join(d, 'Brb02Toolbox', 'fps_verdict.txt')
+                    diag = mon.diagnose()
+                    with open(p, 'w', encoding='utf-8') as f:
+                        f.write(f'时间: {time.strftime("%Y-%m-%d %H:%M:%S")}\n')
+                        f.write(f'管理员: {diag.get("backup_privilege")} '
+                                f'(备份特权) / reason={__import__("ctypes").windll.shell32.IsUserAnAdmin()}\n')
+                        f.write(f'结论: ok={r.get("ok")} stage={r.get("stage")}\n')
+                        f.write(f'标题: {r.get("title")}\n')
+                        f.write(f'详情: {r.get("detail")}\n')
+                        f.write(f'PresentMon: {diag.get("binary")}\n')
+                        f.write(f'命令: {" ".join(diag.get("command") or [])}\n')
+                        f.write(f'stderr: {r.get("raw")}\n')
+                except Exception:
+                    pass
+            except Exception as e:
+                LOGBUF.write(f'[浮窗] 启动自检异常: {e!r}')
+
+        threading.Thread(target=_work, name='FpsStartupVerify', daemon=True).start()
+
+    def _on_overlay_metrics(self, metrics: dict):
+        """浮窗每次 1Hz 采样后检查 FPS 采集器状态。
+
+        每次**状态跃迁**都落一行 app.log —— 这样用户导出的诊断包里能直接看到
+        PresentMon 到底卡在哪一步 (权限 / 无 binary / 无呈现事件 / 已在出帧)。
+        """
+        mon = getattr(self.overlay, 'fps_monitor', None)
+        if mon is None:
+            return
+        try:
+            diag = mon.diagnose()
+        except Exception:
+            return
+        st = diag.get('status')
+        fps = (metrics or {}).get('fps')
+        # 状态跃迁 或 首次拿到 FPS 时记一次日志
+        key = (st, 'fps' if fps else ('rows' if diag.get('frame_rows') else 'silent'))
+        if key != getattr(self, '_fps_log_key', None):
+            self._fps_log_key = key
+            LOGBUF.write(
+                f'[浮窗] FPS 采集: status={st}({diag.get("status_text")}) '
+                f'fps={fps} 原始行={diag.get("raw_lines")} 帧行={diag.get("frame_rows")} '
+                f'活动进程={diag.get("active_procs")} bin={os.path.basename(diag.get("binary") or "-")}'
+                + (f' err={diag.get("last_error")[:200]}' if diag.get('last_error') else '')
+            )
+        # 心跳: 每 15s 无条件记一行, 「采一会就断」时能看到断点的前后状态
+        now = time.time()
+        if now - getattr(self, '_fps_hb_ts', 0.0) >= 15.0:
+            self._fps_hb_ts = now
+            LOGBUF.write(
+                f'[浮窗] FPS 心跳: fps={fps} 1%低={(metrics or {}).get("fps1low")} '
+                f'选中={(metrics or {}).get("app") or "-"} '
+                f'原始行={diag.get("raw_lines")} '
+                f'帧行={diag.get("frame_rows")} 活动进程={diag.get("active_procs")} '
+                f'静默={diag.get("last_feed_age_s")}s 分块={diag.get("chunk_count")}'
+                f'(失败{diag.get("chunk_fail")}) 传输={diag.get("transport")} '
+                f'呈现进程={diag.get("top_apps")} 交换链={diag.get("chains")} '
+                f'被滤={diag.get("filtered")}'
+            )
+        self._trace_fps(fps, (metrics or {}).get('fps1low'),
+                        (metrics or {}).get('app') or '')
+        if st == 'no_admin' and not self._fps_admin_hint_shown:
+            self._fps_admin_hint_shown = True
+            self.tray.showMessage(
+                'FPS 需要管理员权限',
+                'PresentMon 无法创建 ETW 会话, 所以 FPS 显示 --。'
+                '右键托盘 →「以管理员身份重启」后即可显示。',
+                QSystemTrayIcon.Information, 8000)
+        elif st == 'running':
+            self._fps_admin_hint_shown = False
+
+    def _trace_fps(self, fps, low1, app: str):
+        """记录「浮窗此刻到底显示了什么」到 fps_trace.csv。
+
+        采样间隔 = 浮窗刷新节拍 (300ms), 不是 1 秒 —— 实测教训: 原先用
+        `now - last < 1.0` 去节流, 但浮窗是 300ms 一拍, 真正落盘间隔变成 1.2s,
+        于是每 5~6 秒漏 1 秒 (60 秒里丢 9 秒)。对手分析时不能用"行号×1秒"推时刻。
+        更关键的是: 1Hz 采样抓不到两次采样之间的瞬时低值 —— 实测有一张截图浮窗显示
+        178, 而 1Hz trace 全量最小值是 195, 无法判定这个 178 是真实卡顿还是 UI 抖动。
+        改成 300ms 落盘 (约 3.3 行/秒, 4MB 轮转 ≈ 8 小时) 才能定论。
+        """
+        try:
+            now = time.time()
+            if getattr(self, '_trace_path', None) is None:
+                base = os.environ.get('APPDATA') or os.path.expanduser('~')
+                d = os.path.join(base, 'Brb02Toolbox')
+                os.makedirs(d, exist_ok=True)
+                p = os.path.join(d, 'fps_trace.csv')
+                try:
+                    if os.path.exists(p) and os.path.getsize(p) > 4 * 1024 * 1024:
+                        os.replace(p, p + '.1')
+                except OSError:
+                    pass
+                new = not os.path.exists(p)
+                with open(p, 'a', encoding='utf-8') as f:
+                    if new:
+                        f.write('epoch,iso,fps,fps1low,app\n')
+                self._trace_path = p
+            with open(self._trace_path, 'a', encoding='utf-8') as f:
+                f.write(f'{now:.3f},{time.strftime("%H:%M:%S", time.localtime(now))}'
+                        f'.{int((now % 1) * 1000):03d},'
+                        f'{fps if fps is not None else ""},'
+                        f'{low1 if low1 is not None else ""},{app}\n')
+        except Exception:
+            pass
+
+    # ---- 全屏遮挡 ----
+    def _on_fps_selfhealed(self, n: int):
+        """采集链自愈重启 (raw_lines 30s 不增长)。"""
+        LOGBUF.write(f'[浮窗] FPS 采集链自愈重启 (第 {n} 次) —— '
+                     f'上一轮 30s 无新 CSV 行')
+
+    def _on_overlay_occlusion(self, occluded: bool, cover: str):
+        """浮窗被别的窗口盖住/压掉时记一条 —— 全屏游戏"看不到浮窗"的判定依据。"""
+        if occluded:
+            LOGBUF.write(f'[浮窗] ⚠️ 被遮挡: {cover} (已尝试置顶保活)')
+            if not getattr(self, '_occl_hint_shown', False):
+                self._occl_hint_shown = True
+                self.tray.showMessage(
+                    '浮窗被全屏窗口遮挡',
+                    '若游戏处于「独占全屏」模式，置顶浮窗会被系统合成层绕过。'
+                    '请检查游戏设置，建议把游戏画面改为「无边框窗口 / 全屏窗口化」。',
+                    QSystemTrayIcon.Information, 9000)
+        else:
+            self._occl_hint_shown = False
+            LOGBUF.write('[浮窗] 遮挡解除 (浮窗已处于最顶层)')
+
+    def _on_exclusive_fullscreen_changed(self, is_exclusive: bool, desc: str):
+        """处理独占全屏检测事件: 引导用户切为全屏窗口化 / 无边框。"""
+        if is_exclusive:
+            LOGBUF.write(f'[浮窗] ⚠️ 检测到游戏独占全屏: {desc} (DWM桌面合成已暂停)')
+            if not getattr(self, '_exclusive_hint_shown', False):
+                self._exclusive_hint_shown = True
+                self.tray.showMessage(
+                    '检测到游戏独占全屏',
+                    '当前游戏处于「独占全屏」模式，系统 DWM 停止桌面合成导致置顶浮窗未可呈现。'
+                    '建议在游戏设置中切换为「全屏窗口化 / 无边框」，即可正常显示实时浮窗。',
+                    QSystemTrayIcon.Information, 8000)
+        else:
+            self._exclusive_hint_shown = False
+            LOGBUF.write('[浮窗] 退出独占全屏模式，恢复桌面置顶合成')
+            try:
+                self.overlay._burst_topmost()
+            except Exception:
+                pass
+
+    def relaunch_as_admin(self):
+        """以管理员权限重启本程序 (FPS 采集的 ETW 会话需要管理员)。"""
+        if not getattr(sys, 'frozen', False):
+            self.tray.showMessage(
+                '源码模式请手动提权',
+                '请在「以管理员身份运行」的终端里执行: py -3.14 main.py',
+                QSystemTrayIcon.Information, 6000)
+            return
+        try:
+            import ctypes
+            args = ' '.join(f'"{a}"' for a in sys.argv[1:])
+            self._really_quit = True
+            ret = ctypes.windll.shell32.ShellExecuteW(
+                None, 'runas', sys.executable, args, None, 1)
+            if ret <= 32:
+                self._really_quit = False
+                self.tray.showMessage('提权被拒绝', '已保持当前权限继续运行。',
+                                      QSystemTrayIcon.Warning, 4000)
+                return
+            LOGBUF.write('[浮窗] 已请求以管理员身份重启')
+            QTimer.singleShot(300, self.real_quit)
+        except Exception as e:
+            self._really_quit = False
+            LOGBUF.write(f'[浮窗] 提权重启失败: {e!r}')
 
     # ---- 托盘 ----
     def _show(self):
@@ -779,6 +1052,10 @@ class MainWindow(QMainWindow):
 
     def refresh_curve_cache(self):
         self._curve_cache = None
+        try:
+            self.curveChanged.emit()
+        except Exception:
+            pass
 
     def curve_pct(self):
         """曲线 → **19 点**百分比, 与曲线编辑器**同一重采样** (`CurveEditor.resample_pairs`)。
@@ -878,6 +1155,11 @@ class MainWindow(QMainWindow):
             e.ignore()                      # ✕ / Alt+F4: 隐藏到托盘, 不退出
             self.hide_to_tray()
             return
+        if hasattr(self, 'overlay') and self.overlay is not None:
+            try:
+                self.overlay.shutdown()
+            except Exception:
+                pass
         self.worker.stop()
         self.worker.wait(2000)
         if self.worker.isRunning():

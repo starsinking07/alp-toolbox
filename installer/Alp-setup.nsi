@@ -32,6 +32,32 @@ Section "Install"
   ExecWait 'taskkill /F /T /IM "Alp工具箱.exe"'
   Sleep 500
   SetOutPath "$INSTDIR"
+  ; ⚠️ 2026-10-27 用户实测: taskkill 之后仍报「无法打开要写入的文件 ...\Alp工具箱.exe」。
+  ; 本机验证过「运行中的 exe 可以重命名」, 所以失败另有原因:
+  ;   1) 上次安装残留了 Alp工具箱.old.exe, 重命名撞名 → 改用唯一名字;
+  ;   2) 杀软/反作弊(如三角洲的 ACE)在游戏运行时会锁文件 → 只能提示用户先退游戏。
+  ; 策略: 删除 → 重命名(唯一名) → 每次间隔 400ms 重试 8 次, 全失败才报错。
+  StrCpy $1 0
+  ${Do}
+    ClearErrors
+    Delete "$INSTDIR\Alp工具箱.exe"
+    ${IfNot} ${Errors}
+      ${ExitDo}
+    ${EndIf}
+    ClearErrors
+    Rename "$INSTDIR\Alp工具箱.exe" "$INSTDIR\Alp工具箱.old$1.exe"
+    ${IfNot} ${Errors}
+      Delete /REBOOTOK "$INSTDIR\Alp工具箱.old$1.exe"
+      ${ExitDo}
+    ${EndIf}
+    Sleep 400
+    IntOp $1 $1 + 1
+  ${LoopUntil} $1 >= 8
+
+  ${If} ${FileExists} "$INSTDIR\Alp工具箱.exe"
+    MessageBox MB_ICONSTOP|MB_OK "无法替换 Alp工具箱.exe。$\r$\n$\r$\n常见原因:$\r$\n  · 程序还在运行 —— 请在托盘图标上右键「退出」$\r$\n  · 正在玩带反作弊的游戏 (如三角洲 ACE) —— 它会锁住可执行文件, 请先退出游戏$\r$\n  · 杀毒软件正在扫描 —— 稍等片刻重试$\r$\n$\r$\n处理完后点「重试」即可继续安装。"
+    Abort
+  ${EndIf}
   File "..\dist\Alp工具箱.exe"
   File "..\README.md"
   File "..\LICENSE"

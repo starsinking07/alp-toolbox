@@ -10,10 +10,11 @@ import zipfile
 from dataclasses import asdict
 from datetime import datetime
 
-APP_VERSION = '0.2.0'
+APP_VERSION = '0.2.1-beta'
 
 
-def export_diagnostics(cfg, worker, log_text: str, out_path: str) -> str:
+def export_diagnostics(cfg, worker, log_text: str, out_path: str,
+                       extra: dict | None = None) -> str:
     """收集运行状态打包为诊断 zip, 返回写入的文件路径。"""
     manifest = {
         'appName': 'Alp 工具箱',
@@ -57,6 +58,9 @@ def export_diagnostics(cfg, worker, log_text: str, out_path: str) -> str:
         runtime['firmware'] = fw
     except Exception:
         runtime['firmware'] = None
+    # 浮窗 / FPS 采集诊断 (0.2.1): FPS 显示 -- 时必须能从这里一眼看出卡在哪一步
+    if extra:
+        runtime.update(extra)
 
     files = {
         'manifest.json': json.dumps(manifest, ensure_ascii=False, indent=1),

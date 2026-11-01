@@ -15,11 +15,16 @@ class CurveEditor(QWidget):
 
     changed = None          # callable(list[int])
 
-    def __init__(self, dark=False, max_rpm=4800, rpm_axis=False, parent=None):
+    def __init__(self, dark=False, max_rpm=4800, rpm_axis=False, parent=None,
+                 editable=True):
         super().__init__(parent)
         self.dark = dark
         self.max_rpm = max_rpm
         self.rpm_axis = rpm_axis
+        # 2026-10-28: 状态页那张「风扇速度曲线」卡片是**只读展示**, 但它复用了同一个
+        # CurveEditor, 拖动会改本地 pct 却因为 changed=None 永远存不下来, 下一个刷新
+        # 周期又被真实曲线刷回去 —— 用户看到的就是"改了被覆盖"。只读场景必须禁掉拖拽。
+        self.editable = editable
         self.pct = list(DEFAULT_PCT)
         self.drag_idx = -1
         self.current_temp = None      # 当前温度指示线
@@ -93,6 +98,8 @@ class CurveEditor(QWidget):
 
     # ---- 鼠标 ----
     def mousePressEvent(self, ev):
+        if not self.editable:
+            return
         pos = ev.position()
         w, h = self.width(), self.height()
         i = self._temp_at(pos.x(), w)
@@ -102,11 +109,15 @@ class CurveEditor(QWidget):
         self.update()
 
     def mouseMoveEvent(self, ev):
+        if not self.editable:
+            return
         if self.drag_idx >= 0:
             self._drag_to(ev.position(), self.height())
         self.update()
 
     def mouseReleaseEvent(self, ev):
+        if not self.editable:
+            return
         if self.drag_idx >= 0 and self.changed:
             self.changed(self.get_curve())
         self.drag_idx = -1

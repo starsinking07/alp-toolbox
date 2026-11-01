@@ -17,6 +17,13 @@ DEFAULT_PRESETS = {
 
 DEFAULT_CURVE = [(40, 1000), (55, 1500), (70, 2100), (85, 2800)]
 
+DEFAULT_OVERLAY_ITEMS = ['fps', 'cpu_load', 'cpu_temp', 'gpu_load', 'gpu_temp', 'fan_rpm']
+ALL_OVERLAY_ITEMS = (
+    'fps', 'cpu_load', 'cpu_temp', 'cpu_power',
+    'gpu_load', 'gpu_temp', 'gpu_power',
+    'ram', 'vram', 'fan_rpm',
+)
+
 
 @dataclass
 class Config:
@@ -124,6 +131,21 @@ class Config:
     # 2 = 定案 (0x06=响应 / 0x08=刷新, 见 PROTOCOL.md §11.4 D2)。
     # 载入旧配置时把场景方案里存的 light_mode 6/8 互换一次, 然后打版本号防重复迁移。
     light_mode_enc: int = 1
+    # ---- 性能浮窗 (0.2.1, 类 NVIDIA 统计浮层) ----
+    overlay_enabled: bool = False
+    overlay_preset: str = 'top_right'       # top_left / top_right / bottom_left / bottom_right / custom
+    overlay_x_pct: int = 100                # 横向位置 0..100
+    overlay_y_pct: int = 0                  # 纵向位置 0..100
+    overlay_layout: str = 'linear'          # linear (线性单列) / dual (双列) / compact (横向紧凑条)
+    overlay_bg_opacity: int = 50            # 背景不透明度 0..100 (0 = 全透明仅文字+描边)
+    overlay_font_size: str = 'normal'       # small / normal / large
+    overlay_font_color: str = 'white'       # white / lightgray / green / blue / orange / custom
+    overlay_custom_color: str = '#00ffcc'   # 自定义字体颜色 hex
+    overlay_items: list = field(default_factory=lambda: list(DEFAULT_OVERLAY_ITEMS))
+    overlay_game_only: bool = False         # 仅在目标进程运行并有呈现帧时显示整个浮窗
+    overlay_game_processes: list = field(default_factory=list)  # 浮窗显隐目标进程
+    fps_game_only: bool = False             # 仅在目标进程运行并有呈现帧时显示 FPS 数值
+    fps_game_processes: list = field(default_factory=list)      # FPS 数值目标进程
 
     # ---- IO ----
     @classmethod
@@ -289,6 +311,42 @@ class Config:
             self.screen_mode = 'card'
         if self.titlebar_btn not in ('thin', 'normal'):
             self.titlebar_btn = 'thin'
+        # 性能浮窗字段归一化
+        self.overlay_enabled = bool(self.overlay_enabled)
+        if self.overlay_preset not in ('top_left', 'top_right', 'bottom_left', 'bottom_right', 'custom'):
+            self.overlay_preset = 'top_right'
+        self.overlay_x_pct = _clamp(self.overlay_x_pct, 0, 100, 100)
+        self.overlay_y_pct = _clamp(self.overlay_y_pct, 0, 100, 0)
+        if self.overlay_layout not in ('linear', 'dual', 'compact'):
+            self.overlay_layout = 'linear'
+        self.overlay_bg_opacity = _clamp(self.overlay_bg_opacity, 0, 100, 50)
+        if self.overlay_font_size not in ('small', 'normal', 'large'):
+            self.overlay_font_size = 'normal'
+        if self.overlay_font_color not in ('white', 'lightgray', 'green', 'blue', 'orange', 'custom'):
+            self.overlay_font_color = 'white'
+        if not isinstance(self.overlay_custom_color, str) or not self.overlay_custom_color.startswith('#'):
+            self.overlay_custom_color = '#00ffcc'
+        if not isinstance(self.overlay_items, list):
+            self.overlay_items = list(DEFAULT_OVERLAY_ITEMS)
+        else:
+            valid_items = [str(k) for k in self.overlay_items if str(k) in ALL_OVERLAY_ITEMS]
+            # 保持 ALL_OVERLAY_ITEMS 的标准顺序并去重
+            seen_it = set()
+            ordered = []
+            for k in ALL_OVERLAY_ITEMS:
+                if k in valid_items and k not in seen_it:
+                    seen_it.add(k)
+                    ordered.append(k)
+            self.overlay_items = ordered
+        self.overlay_game_only = bool(self.overlay_game_only)
+        self.fps_game_only = bool(self.fps_game_only)
+        for attr in ('overlay_game_processes', 'fps_game_processes'):
+            raw_names = getattr(self, attr, [])
+            if not isinstance(raw_names, list):
+                raw_names = []
+            setattr(self, attr, list(dict.fromkeys(
+                name.strip().lower() for name in raw_names
+                if isinstance(name, str) and name.strip())))
 
     _save_lock = threading.Lock()
 
