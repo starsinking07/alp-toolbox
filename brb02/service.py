@@ -93,6 +93,7 @@ class DeviceWorker(QThread):
             self.device.ble_address = config.ble_address   # 记忆地址, 启动可蓝牙直连
         self.temps = TempReader()
         self._stop = False
+        self._stop_event = threading.Event()
         self._paused = False
         self._reconnect_req: str | None = None
         self._auto_probe_ts = 0.0
@@ -112,6 +113,7 @@ class DeviceWorker(QThread):
         self._button_push_req = 0             # 物理按键档位配置写设备请求 (0=无, 1-4=该档, -1=全档)
         self._scene_applied_key = None        # 场景应用态 (('p',idx)/('none',proc))
         self._scene_saved = None              # 进入场景前快照 (0.1.9)
+        self._scene_rpm_pending = None        # 情景意图由控制引擎经过保护判断后下发
         self._scene_rpm_applied = False     # 情景转速已下发 (规则清空后需恢复, 审计 G11)
         # 温度处理链状态
         self._temp_state = {}    # 每通道 (cpu/gpu) 独立的 EMA/尖峰状态
@@ -220,6 +222,7 @@ class DeviceWorker(QThread):
     # ============ 主循环 ============
     def stop(self):
         self._stop = True
+        self._stop_event.set()
         self._upload_cancel.set()            # 退出时终止在跑的上传/等待 (审计 G8)
         self._screen_cancel.set()
         self.temps.stop()
@@ -343,6 +346,8 @@ class DeviceWorker(QThread):
                                self._spike_filtered(gpu_raw, 'gpu'))
 
     def _tick(self, info_timer):
+        if self._stop:
+            return
         self._push_temps()          # 温度先行: 不依赖设备是否连上
         # 手动断开: 暂停轮询与重连
         if self._paused:
@@ -358,6 +363,8 @@ class DeviceWorker(QThread):
             self._last_sent_rpm = None
         if not self.device.connected:
             if not self._connect():
+                if self._stop:
+                    return
                 # 配置通道上没有设备: 启动/重连失败同样做双向探测 (双通道识别)
                 if self.config.auto_switch:
                     self._auto_switch_tick(time.time(), False)
@@ -401,7 +408,7 @@ class DeviceWorker(QThread):
             if self._miss_streak < 2:
                 return
             # 瞬断重连
-            if self.device.connect():
+            if self.device.connect(cancel_event=self._stop_event):
                 self._miss_streak = 0
                 self._last_sent_rpm = None   # 重连后强制重发当前目标 (防假成功残留, v3.61)
                 return
@@ -475,6 +482,7 @@ class DeviceWorker(QThread):
         # 转速闭环补偿 (loop 模式): 用刚收到的 0x06 实测值微调下发量
         self._update_rpm_trim(now)
         # 控制引擎
+        self._scene_tick()                    # 包含关闭开关后的恢复，不直接改转速
         self._control_tick(cpu_ctl, gpu_ctl, now)   # 控制用平滑值 (显示用的是上面未平滑的)
 
         # 屏幕信息卡维持 (连接恢复 + 情境卡片决策)
@@ -486,10 +494,6 @@ class DeviceWorker(QThread):
         # USB / 蓝牙自动切换 (拔线切蓝牙, 插线切回 USB)
         if self.config.auto_switch:
             self._auto_switch_tick(now, st is not None)
-
-        # 情景联动
-        if self.config.scene_enabled:
-            self._scene_tick()
 
         # 信息刷新 (15s)
         if now - info_timer > 15:
@@ -604,6 +608,15 @@ class DeviceWorker(QThread):
                 self._apply_target(target, now, 'button-curve')
             else:
                 self._apply_target(int(prof.get('rpm') or 0), now, 'button-fixed')
+            return
+
+        # 情景只请求一次目标，经过温度墙、启停和物理按键模式之后才能落地。
+        # 被温度墙暂缓的意图留到保护解除；保留原有的十秒手动保持语义。
+        scene_rpm = getattr(self, '_scene_rpm_pending', None)
+        if cfg.scene_enabled and scene_rpm is not None:
+            self._apply_target(scene_rpm, now, 'scene')
+            self._scene_rpm_pending = None
+            self._manual_until = now + 10
             return
 
         # --- 手动模式: GUI 手动设定后的保持期内不动 ---
@@ -1593,6 +1606,12 @@ class DeviceWorker(QThread):
     def _scene_tick(self):
         """场景配置 (0.1.9): 前台进程命中 profile → 应用 [固定转速/曲线方案/灯效模式];
         离开场景 → 恢复进入前快照。修复旧版"离开有规则进程后 RPM 残留" (P2)。"""
+        if not self.config.scene_enabled:
+            if self._scene_saved is not None:
+                self._restore_scene()
+            self._scene_applied_key = None
+            self._scene_rpm_pending = None
+            return
         proc = foreground_process()
         if not proc:
             return
@@ -1628,11 +1647,7 @@ class DeviceWorker(QThread):
         from .logbuf import LOGBUF
         try:
             rpm = int(prof.get('rpm', 0) or 0)
-            if rpm > 0:
-                self._push_fixed(rpm, self._dev_level(), src=getattr(self, '_cooling_src', None))
-                self._last_sent_rpm = rpm
-                self._last_host_0x24_ts = time.time()
-                self._manual_until = time.time() + 10
+            self._scene_rpm_pending = max(0, min(MAX_RPM, rpm)) if rpm > 0 else None
             scheme = prof.get('scheme') or ''
             if scheme and scheme in (self.config.curve_profiles or {}):
                 self.config.curve_active = scheme
@@ -1654,7 +1669,11 @@ class DeviceWorker(QThread):
 
     def _restore_scene(self):
         from .logbuf import LOGBUF
+        self._scene_rpm_pending = None
         saved = self._scene_saved or {}
+        self._scene_saved = None
+        self._manual_until = 0.0
+        self._last_sent_rpm = None            # 即使灯效恢复失败也要交还转速控制
         try:
             if 'curve_active' in saved:
                 self.config.curve_active = saved['curve_active']
@@ -1662,8 +1681,6 @@ class DeviceWorker(QThread):
                 self.config.save()
             if 'rgb9' in saved:
                 self.device._send(protocol.build_frame(0x12, bytes(saved['rgb9'][:8])))
-            self._last_sent_rpm = None        # 引擎下 tick 恢复固定转速/曲线
-            self._scene_saved = None
             LOGBUF.write('[场景] 已恢复进入前状态')
         except Exception as e:
             LOGBUF.write(f'[场景] 恢复失败: {e}')
@@ -1680,7 +1697,7 @@ class DeviceWorker(QThread):
             hint = ', 请长按散热器按键 3-5 秒触发广播' if user else ''
             self.connectionChanged.emit(False, f'蓝牙扫描/连接中 (最长{ble_timeout:.0f}秒{hint})...')
         try:
-            ok = self.device.connect(timeout=ble_timeout)
+            ok = self.device.connect(timeout=ble_timeout, cancel_event=self._stop_event)
         except Exception as e:
             import traceback
             from .logbuf import LOGBUF
@@ -1688,6 +1705,8 @@ class DeviceWorker(QThread):
             traceback.print_exc()
             LOGBUF.write(f'[连接异常] {e}\n{tb}')
             self.connectionChanged.emit(False, f'连接异常: {e}')
+            return False
+        if self._stop:
             return False
         if ok:
             ch = '蓝牙 BLE' if self.device.conn_type == 'ble' else 'USB'
@@ -1699,6 +1718,7 @@ class DeviceWorker(QThread):
             self._last_dev_rpm = None
             self._scene_applied_key = None      # 重连后场景重新评估, 快照作废 (自检②)
             self._scene_saved = None
+            self._scene_rpm_pending = None
             try:
                 self.send_param_page_config()   # 重连后重推参数页显示配置 (0xC2)
             except Exception:

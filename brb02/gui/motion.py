@@ -21,7 +21,7 @@ from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QObject,
                             QPoint, QPointF, QPropertyAnimation, QRectF, Qt,
                             QTimer, QVariantAnimation, Property)
 from PySide6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPainterPath
-from PySide6.QtWidgets import (QDialog, QFrame, QGraphicsDropShadowEffect,
+from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QGraphicsDropShadowEffect,
                                QGraphicsOpacityEffect, QLabel, QScrollArea,
                                QWidget)
 
@@ -37,6 +37,7 @@ MS_PAGE_OUT = 190    # 出场 (140→190: 用户"可以慢但必须顺" —— �
 MS_PAGE_IN = 180
 MS_DIALOG = 150
 MS_PANEL = 200       # 浮动面板
+MS_DOCK = 420        # 侧栏宽度；与参考的 expo-out 节奏一致
 MS_STAGGER = 55      # 卡片交错步进 (同上, 拉长换顺)
 MS_STAGGER_DUR = 260
 MS_STAGGER_MAX = 4
@@ -60,15 +61,21 @@ def ease(points=EASE_SIGNATURE) -> QEasingCurve:
 
 # ─────────────────────────── 无障碍 (手册 §11) ───────────────────────────
 _REDUCED: bool | None = None
+_FAST_MODE = False
+
+
+def set_fast_mode(enabled: bool) -> None:
+    """User override is additive; it must not overwrite the OS preference."""
+    global _FAST_MODE
+    _FAST_MODE = bool(enabled)
 
 
 def reduced_motion() -> bool:
     """系统是否要求减少动态效果。环境变量 ALP_NO_ANIM=1 可强制关闭 (排查用)。"""
     global _REDUCED
+    if _FAST_MODE or os.environ.get('ALP_NO_ANIM') == '1':
+        return True
     if _REDUCED is not None:
-        return _REDUCED
-    if os.environ.get('ALP_NO_ANIM') == '1':
-        _REDUCED = True
         return _REDUCED
     try:
         import ctypes
@@ -244,12 +251,51 @@ class _PageOverlay(QWidget):
         p.end()
 
 
+class _SnapshotGuard(QObject):
+    """Invalidate a cached page as soon as its visible content can change.
+
+    An application filter also sees newly added descendants. It removes itself
+    on the first invalidation, so a dirty/live page does not retain a hot filter.
+    """
+    EVENTS = frozenset((QEvent.Paint, QEvent.UpdateLater, QEvent.LayoutRequest,
+                        QEvent.StyleChange, QEvent.PaletteChange, QEvent.FontChange,
+                        QEvent.Resize, QEvent.Move, QEvent.Wheel, QEvent.KeyPress,
+                        QEvent.MouseButtonPress, QEvent.ChildAdded, QEvent.ChildRemoved))
+
+    def __init__(self, wrapper):
+        super().__init__(wrapper)
+        self.wrapper = wrapper
+        QApplication.instance().installEventFilter(self)
+
+    def invalidate(self):
+        self.wrapper._alp_snap = None
+        self.wrapper._alp_snap_guard = None
+        QApplication.instance().removeEventFilter(self)
+        self.deleteLater()
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in self.EVENTS and isinstance(obj, QWidget):
+            if obj is self.wrapper or self.wrapper.isAncestorOf(obj):
+                self.invalidate()
+        return False
+
+
+def _remember_snapshot(wrapper, pixmap):
+    previous = getattr(wrapper, '_alp_snap_guard', None)
+    if previous is not None:
+        previous.invalidate()
+    # Construct the guard before storing the image (ChildAdded may be delivered
+    # synchronously while parenting a new QObject).
+    wrapper._alp_snap_guard = _SnapshotGuard(wrapper)
+    wrapper._alp_snap = (pixmap, _time.time())
+
+
 def _cached_snapshot(wrapper: QWidget):
-    """页面停留期间后台备好的快照 (≤3s 新鲜)。没有/过期 → None (现场 grab)。"""
+    """Reuse only unmodified recent content; dirty/expired pages need a new grab."""
     snap = getattr(wrapper, '_alp_snap', None)
     if snap is not None:
         pm, ts = snap
-        if _time.time() - ts <= 10.0:      # 单次预热 (无续期): 10s 内的陈旧在 190ms 淡出里不可见
+        if _time.time() - ts <= 10.0:
             return pm
     return None
 
@@ -271,7 +317,7 @@ def _prime_snapshot(stack: QWidget, wrapper: QWidget, gen: int) -> None:
             dpr = wrapper.devicePixelRatioF() or 1.0
             if abs(pm.devicePixelRatioF() - dpr) > 0.01:
                 pm.setDevicePixelRatio(dpr)
-            wrapper._alp_snap = (pm, _time.time())
+            _remember_snapshot(wrapper, pm)
         except RuntimeError:
             return
         # 不续期 (2026-10-25): 每 3s 整页 grab 在真机上是周期性绘制风暴;
@@ -373,6 +419,138 @@ def page_transition(stack, old: QWidget | None, new: QWidget, direction: int = 1
     st['anims'].append(a1)
 
 
+# ─────────────────────────── 实验切页预览 ───────────────────────────
+PREVIEW_CAPTURE_BUDGET_MS = 80   # 一次性截图；不当成连续动画的帧耗时
+PREVIEW_FRAME_BUDGET_MS = 40     # 连续两帧超时才判定帧节奏持续不稳
+
+
+class _PreviewLayer(QWidget):
+    """Experimental content-only compositor: one pixmap per frame, no effect."""
+    def __init__(self, stack, old_pm, new_pm, direction, background, stats):
+        super().__init__(stack)
+        self.old_pm, self.new_pm = old_pm, new_pm
+        self.direction, self.background = direction, QColor(background)
+        self.stats = stats
+        self.entering = False
+        self._progress = 0.0
+        self._curve = ease()
+        self._last_paint = None
+        self._slow_frames = 0
+        self.abort = None
+        # We fill every pixel before blending the snapshot. Without this hint
+        # Qt repaints the entire live page under the overlay on every frame.
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setGeometry(stack.rect())
+        stack.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QEvent.Resize, QEvent.Hide) and self.abort:
+            self.abort()
+        return False
+
+    def get_progress(self):
+        return self._progress
+
+    def set_progress(self, value):
+        self._progress = value
+        self.entering = value * 330 >= 150
+        self.update()
+
+    progress = Property(float, get_progress, set_progress)
+
+    def paintEvent(self, ev):
+        started = _time.perf_counter()
+        if self._last_paint is not None:
+            gap = (started - self._last_paint) * 1000
+            self.stats['frame_intervals_ms'].append(round(gap, 3))
+            self.stats['frame_intervals_ms'][:] = self.stats['frame_intervals_ms'][-60:]
+            self._slow_frames = self._slow_frames + 1 if gap > PREVIEW_FRAME_BUDGET_MS else 0
+        self._last_paint = started
+        p = QPainter(self)
+        p.fillRect(self.rect(), self.background)
+        elapsed_ms = self._progress * 330
+        phase = (elapsed_ms - 150) / 180 if self.entering else elapsed_ms / 150
+        k = self._curve.valueForProgress(max(0.0, min(1.0, phase)))
+        opacity = k if self.entering else 1.0 - k
+        dy = (18 * (1-k) if self.entering else -14*k) * self.direction
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.setOpacity(opacity)
+        p.drawPixmap(QPointF(0, dy), self.new_pm if self.entering else self.old_pm)
+        p.end()
+        elapsed = (_time.perf_counter() - started) * 1000
+        self.stats['paint_ms'].append(round(elapsed, 3))
+        self.stats['paint_ms'][:] = self.stats['paint_ms'][-60:]
+        if (elapsed > 24 or self._slow_frames >= 2) and self.abort:
+            self.stats['fallback'] = 'slow_paint' if elapsed > 24 else 'slow_frames'
+            self.parentWidget()._alp_preview_slow = True
+            QTimer.singleShot(0, self.abort)
+
+
+def page_preview(stack, old, new, direction=1, on_done=None):
+    """Opt-in 150ms exit + 180ms enter; expensive runs fall back to page_swap.
+
+    Real pages stay layout-managed. Snapshot capture and blits are measured,
+    not claimed to guarantee desktop FPS. Reduced motion always wins.
+    """
+    gen = _cancel_transition(stack)
+    if old is not None:
+        _cancel_stagger(old)
+    _cancel_stagger(new)
+    stats = {'capture_ms': 0.0, 'paint_ms': [], 'frame_intervals_ms': [], 'fallback': ''}
+    stack._alp_preview_stats = stats
+    if (duration(MS_PAGE_IN) == 0 or old is None or old is new or
+            not stack.isVisible() or getattr(stack, '_alp_preview_slow', False)):
+        stats['fallback'] = 'reduced_hidden_or_slow'
+        page_swap(stack, old, new, on_done=on_done)
+        return
+    started = _time.perf_counter()
+    old_pm = _cached_snapshot(old)
+    if (old_pm is not None and
+            (old_pm.deviceIndependentSize().toSize() != old.size() or
+             abs(old_pm.devicePixelRatioF() - old.devicePixelRatioF()) > 0.01)):
+        old_pm = None
+    stats['old_capture_cached'] = old_pm is not None
+    if old_pm is None:
+        old_pm = old.grab()
+    stack.setCurrentWidget(new)
+    new_pm = new.grab()
+    _remember_snapshot(new, new_pm)
+    stats['capture_ms'] = round((_time.perf_counter()-started)*1000, 3)
+    if stats['capture_ms'] > PREVIEW_CAPTURE_BUDGET_MS:
+        stats['fallback'] = 'slow_capture'
+        stack._alp_preview_slow = True
+        if on_done:
+            on_done()
+        return
+    from .theme import DARK, LIGHT
+    dark = bool(getattr(getattr(stack.window(), 'cfg', None), 'dark', False))
+    layer = _PreviewLayer(stack, old_pm, new_pm, direction,
+                          (DARK if dark else LIGHT)['bg'], stats)
+    st = {'overlay': layer, 'target': new, 'anims': [], 'gen': gen}
+    stack._alp_pt = st
+
+    def finish():
+        if getattr(stack, '_alp_gen', 0) != gen or stack._alp_pt is not st:
+            return
+        _cancel_transition(stack)
+        if on_done:
+            on_done()
+
+    layer.abort = finish
+    layer.show()
+    layer.raise_()
+    # One timeline avoids an extra timer boundary between the two phases;
+    # each phase applies the reference bezier independently in paintEvent.
+    anim = QPropertyAnimation(layer, b'progress', layer)
+    anim.setStartValue(0.0)
+    anim.setEndValue(1.0)
+    anim.setDuration(330)
+    anim.setEasingCurve(QEasingCurve.Type.Linear)
+    anim.finished.connect(finish)
+    st['anims'].append(anim)
+    anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+
 # ─────────────────────────── 卡片交错入场 (手册 §3) ───────────────────────────
 class _PaintGate(QObject):
     """卡片"封笔"器: 拦截卡片及其子树的 Paint 事件, 解封前不出像素。
@@ -398,6 +576,10 @@ class _PaintGate(QObject):
             self._blocked = False
             self.detach()
             self._card.update()
+            # Removing event filters does not release a QObject parented to the
+            # card. Delayed starts are generation-guarded; defer destruction so
+            # the current callback can finish safely.
+            self.deleteLater()
 
     def detach(self) -> None:
         targets, self._targets = getattr(self, '_targets', ()), ()
@@ -796,8 +978,8 @@ def reveal_block(w: QWidget, show: bool, ms: int = 200, on_done=None) -> None:
 
 
 # ─────────────────────────── 宽度动画 (侧栏展开/收起) ───────────────────────────
-def animate_width(w: QWidget, target: int, ms: int = 200, on_done=None) -> None:
-    """setFixedWidth 的动画版 (200ms 签名缓动)。侧栏 76↔200 用。"""
+def animate_width(w: QWidget, target: int, ms: int = MS_DOCK, on_done=None) -> None:
+    """64↔192 side dock; follow every Qt tick, skip only identical pixels."""
     old = getattr(w, '_alp_width_anim', None)
     if old is not None:
         try:
@@ -813,14 +995,12 @@ def animate_width(w: QWidget, target: int, ms: int = 200, on_done=None) -> None:
     anim.setStartValue(float(w.width()))
     anim.setEndValue(float(target))
     anim.setDuration(ms)
-    anim.setEasingCurve(ease(EASE_SIGNATURE))
-    skip = [True]
+    anim.setEasingCurve(ease(EASE_EXPO))
 
     def _tick(v):
-        skip[0] = not skip[0]
-        if skip[0] and v < 1.0:
-            return                       # 30fps: setFixedWidth 每帧触发全窗口布局重算
-        w.setFixedWidth(int(v))
+        width = int(round(v))
+        if width != w.width():
+            w.setFixedWidth(width)
 
     anim.valueChanged.connect(_tick)
     if on_done:

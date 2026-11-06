@@ -28,3 +28,9 @@ tools/*
 # 内部文档
 HANDOFF.md
 BRB02_protocol_for_FanControl.md
+
+!tools/build_release.cmd
+!tools/build_release.py
+!tools/qt_bundle_guard.py
+!tools/check_packaged_qt.py
+!tools/test_about_page.py

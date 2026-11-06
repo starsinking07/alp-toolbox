@@ -5,9 +5,13 @@
 产物: dist/Alp工具箱.exe
 """
 import os
+import sys
 from PyInstaller.utils.hooks import collect_all
 
 ROOT = os.path.abspath(SPECPATH)
+sys.path.insert(0, ROOT)
+from tools.qt_bundle_guard import clean_build_path, sanitize_binaries
+clean_build_path(os.environ, sys.base_prefix)
 LHM_DIR = os.path.join(ROOT, 'LHM')
 LHM_DLL = os.path.join(LHM_DIR, 'LibreHardwareMonitorLib.dll')
 
@@ -61,6 +65,9 @@ a = Analysis(
     optimize=0,
 )
 
+# Qt uses the Windows ICU API. A similarly named ICU from Poppler exports
+# different entry points and causes error 127 on machines that load that copy.
+a.binaries = sanitize_binaries(a.binaries)
 pyz = PYZ(a.pure)
 
 exe = EXE(

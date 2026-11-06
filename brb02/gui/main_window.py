@@ -302,7 +302,7 @@ class Sidebar(QWidget):
     def toggle(self):
         self.expanded = not self.expanded
         # 展开方向: 先出文字随宽度逐渐露出; 收起方向: 宽度收完再清文字/居中,
-        # 避免动画中途图标跳位。200ms 签名缓动 (减少动态效果时 animate_width 自动瞬时)。
+        # 避免动画中途图标跳位。420ms expo-out (减少动态效果时自动瞬时)。
         self.btn_toggle.setText('« 收起' if self.expanded else '»')
         for b in self.nav_btns:
             name = self.LABEL[b._page_key]
@@ -324,6 +324,7 @@ class MainWindow(QMainWindow):
     def __init__(self, cfg, worker):
         super().__init__()
         self.cfg = cfg
+        motion.set_fast_mode(cfg.motion_fast_mode)
         self.worker = worker
         self.last_temp = 0.0
         self.last_rpm = 0
@@ -450,9 +451,16 @@ class MainWindow(QMainWindow):
         # 即全部 duration()=0 的既有通道), 切换/交错/hover/仪表追赶全部零成本。
         a_fast = QAction('流畅优先 (关闭全部动效)', self)
         a_fast.setCheckable(True)
-        a_fast.setChecked(getattr(motion, '_REDUCED', False) is True)
+        a_fast.setChecked(getattr(motion, '_FAST_MODE', False))
         a_fast.toggled.connect(self._set_fast_mode)
+        self._tray_fast_action = a_fast
         menu.addAction(a_fast)
+        a_page_preview = QAction('丝滑切页（实验）', self)
+        a_page_preview.setCheckable(True)
+        a_page_preview.setChecked(bool(cfg.page_motion_preview))
+        a_page_preview.toggled.connect(self._set_page_preview)
+        self._tray_page_preview_action = a_page_preview
+        menu.addAction(a_page_preview)
         menu.addSeparator()
 
         a_quit = QAction('退出 Alp 工具箱', self)
@@ -503,6 +511,7 @@ class MainWindow(QMainWindow):
 
         self.apply_theme(cfg.dark)
         self.switch_page('status')
+        self._sync_motion_ui()
 
         self.ui_timer = QTimer(self)
         self.ui_timer.timeout.connect(self._ui_heartbeat)
@@ -568,7 +577,20 @@ class MainWindow(QMainWindow):
         分摊到各页而不是一次做完, 免得启动时反而卡一下。
         """
         keys = _keys if _keys is not None else [k for k in self.wrappers if k != self._cur_page_key]
-        if not keys:
+        if not keys or getattr(self, '_really_quit', False):
+            return
+        transition = getattr(self.stack, '_alp_pt', None)
+        busy = bool(transition and transition.get('overlay') is not None)
+        width_anim = getattr(self.sidebar, '_alp_width_anim', None)
+        if width_anim is not None:
+            try:
+                busy = busy or width_anim.state() == QAbstractAnimation.State.Running
+            except RuntimeError:
+                pass
+        if busy:
+            # Startup warming competes with user navigation for the GUI thread.
+            # Keep all pending keys and resume after the visible animation.
+            QTimer.singleShot(120, lambda: self._prewarm_pages(keys))
             return
         w = self.wrappers.get(keys[0])
         if w is not None and w is not self.stack.currentWidget():
@@ -610,7 +632,9 @@ class MainWindow(QMainWindow):
         def _enter():
             motion.stagger_reveal(new)          # §3: 55ms 步进 / 前 5 张 / 代际取消
 
-        if os.environ.get('ALP_SLIDE') == '1':
+        if self.cfg.page_motion_preview:
+            motion.page_preview(self.stack, old, new, direction=d)
+        elif os.environ.get('ALP_SLIDE') == '1':
             motion.page_transition(self.stack, old, new, direction=d, enter=_enter)
         else:
             motion.page_swap(self.stack, old, new, direction=d, enter=_enter)
@@ -917,26 +941,59 @@ class MainWindow(QMainWindow):
                                   QSystemTrayIcon.Information, 3000)
 
     def _set_fast_mode(self, on: bool):
-        """托盘一键: 全动效瞬时 (含风扇图标静止)。慢光栅机器的逃生通道。"""
+        """Settings and tray share one persisted user preference."""
         from . import motion
-        motion._REDUCED = bool(on)
+        on = bool(on)
+        cfg = getattr(self, 'cfg', None)
+        if cfg is not None and cfg.motion_fast_mode != on:
+            cfg.motion_fast_mode = on
+            cfg.save()
+        motion.set_fast_mode(on)
+        if on and getattr(self, 'stack', None) is not None:
+            motion._cancel_transition(self.stack)
         try:
             from .widgets import FanIcon
             for fi in self.findChildren(FanIcon):
-                if on:
-                    fi._timer.stop()
                 fi._fast_mode = on
+            for widget in self.findChildren(QWidget):
+                sync = getattr(widget, 'sync_motion', None)
+                if callable(sync):
+                    sync()
         except Exception:
             pass
+        sync_ui = getattr(self, '_sync_motion_ui', None)
+        if callable(sync_ui):
+            sync_ui()
         LOGBUF.write(f'[动效] 流畅优先 = {on}')
+
+    def _set_page_preview(self, on: bool):
+        self.cfg.page_motion_preview = bool(on)
+        self.cfg.save()
+        motion._cancel_transition(self.stack)
+        self.stack._alp_preview_slow = False
+        for wrapper in self.wrappers.values():
+            motion._cancel_stagger(wrapper)
+        sync_ui = getattr(self, '_sync_motion_ui', None)
+        if callable(sync_ui):
+            sync_ui()
+
+    def _sync_motion_ui(self):
+        for name, checked in (('_tray_fast_action', self.cfg.motion_fast_mode),
+                              ('_tray_page_preview_action', self.cfg.page_motion_preview)):
+            action = getattr(self, name, None)
+            if action is not None:
+                blocked = action.blockSignals(True)
+                action.setChecked(bool(checked))
+                action.blockSignals(blocked)
+        ctrl = self.pages.get('control')
+        if ctrl is not None:
+            ctrl.sync_motion_preferences()
 
     def real_quit(self):
         """托盘「退出」: 优雅真退出 (走 closeEvent 停 worker/热键, 不留后台)。"""
         self._really_quit = True
+        QApplication.instance().setQuitOnLastWindowClosed(False)
         self.close()
-        QApplication.quit()
-        self.raise_()
-        self.activateWindow()
 
     def _tray_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger:
@@ -1155,16 +1212,44 @@ class MainWindow(QMainWindow):
             e.ignore()                      # ✕ / Alt+F4: 隐藏到托盘, 不退出
             self.hide_to_tray()
             return
-        if hasattr(self, 'overlay') and self.overlay is not None:
-            try:
-                self.overlay.shutdown()
-            except Exception:
-                pass
-        self.worker.stop()
-        self.worker.wait(2000)
-        if self.worker.isRunning():
-            # 屏幕上传整程 ~16s: 首段 2s 不够时再给硬超时, 避免留僵尸线程
-            self.worker.wait(8000)
+        if getattr(self, '_shutdown_ready', False):
+            e.accept()
+            return
+        e.ignore()
+        if getattr(self, '_shutdown_started', False):
+            return
+        self._shutdown_started = True
+        self.setEnabled(False)
+        self.setWindowTitle(APP_NAME + ' — 正在退出…')
+        self.worker.stop()  # Signals cancellation; never joins on the GUI thread.
+        self.ui_timer.stop()
+        self._tray_timer.stop()
         if self.hotkeys:
             self.hotkeys.stop()
-        e.accept()
+        self.overlay.shutdown(wait=False)
+
+        # Keep Qt objects alive while native threads/PresentMon are being released.
+        # Only the final poll is allowed to close the window and stop the event loop.
+        def cleanup():
+            try:
+                self.overlay.fps_monitor.shutdown()
+                if self.hotkeys:
+                    self.hotkeys.join()
+            except Exception as exc:
+                LOGBUF.write(f'[退出] 后台清理异常: {exc!r}')
+        self._shutdown_thread = threading.Thread(target=cleanup, name='Alp-Shutdown', daemon=True)
+        self._shutdown_thread.start()
+        self._shutdown_timer = QTimer(self)
+        self._shutdown_timer.setInterval(50)
+        self._shutdown_timer.timeout.connect(self._poll_shutdown)
+        self._shutdown_timer.start()
+
+    def _poll_shutdown(self):
+        if self.worker.isRunning() or self._shutdown_thread.is_alive():
+            return
+        self._shutdown_timer.stop()
+        self._shutdown_ready = True
+        self.tray.hide()
+        self.close()
+        if self._really_quit:
+            QApplication.quit()

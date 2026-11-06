@@ -299,12 +299,23 @@ class ConnPill(QWidget):
         self.text = '已连接' if self.conn else '离线'
         self._refresh_size()
         self.update()
+        self.sync_motion()
+
+    def sync_motion(self):
         from . import motion
-        if self.conn and not motion.reduced_motion():
+        if self.isVisible() and self.conn and not motion.reduced_motion():
             if not self._timer.isActive():
                 self._timer.start()
         else:
             self._timer.stop()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self.sync_motion()
+
+    def hideEvent(self, ev):
+        self._timer.stop()
+        super().hideEvent(ev)
 
     def set_dark(self, dark: bool):
         self.set_state(self.conn, dark)
@@ -381,7 +392,7 @@ class SemiGauge(QWidget):
     def _skel_sync(self):
         """有值停脉冲, 无值启动 (减少动态效果时不启动, 画静态块)。"""
         from . import motion
-        if self.value is None and not motion.reduced_motion():
+        if self.isVisible() and self.value is None and not motion.reduced_motion():
             if not self._skel_timer.isActive():
                 self._skel_timer.start()
         else:
@@ -392,6 +403,16 @@ class SemiGauge(QWidget):
         from . import motion
         target = self.value or 0.0
         start = self._anim_value
+
+        if not self.isVisible():
+            old = getattr(self, '_alp_chase', None)
+            if old is not None:
+                try:
+                    old.stop()
+                except RuntimeError:
+                    pass
+            self._anim_value = target
+            return
 
         self._chase_skip = False
 
@@ -404,6 +425,24 @@ class SemiGauge(QWidget):
                 self.update()
 
         motion.chase(self, start, target, motion.MS_GAUGE, _tick)
+
+    def sync_motion(self):
+        self._skel_sync()
+        self._chase()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self.sync_motion()
+
+    def hideEvent(self, ev):
+        self._skel_timer.stop()
+        old = getattr(self, '_alp_chase', None)
+        if old is not None:
+            try:
+                old.stop()
+            except RuntimeError:
+                pass
+        super().hideEvent(ev)
 
     def set_color(self, color: str):
         """只更新强调色并重绘 (主题切换时由 StatusPage 同步调用, 不等下一 tick)。"""
@@ -491,21 +530,38 @@ class FanIcon(QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._rpm = 0
+        self._max_rpm = 4800
 
     def set_rpm(self, rpm: int, max_rpm: int = 4800):
         self._rpm = rpm
-        pct = max(0.0, min(1.0, rpm / max_rpm)) if max_rpm else 0
+        self._max_rpm = max_rpm
+        self.sync_motion()
+
+    def sync_motion(self):
+        pct = max(0.0, min(1.0, self._rpm / self._max_rpm)) if self._max_rpm else 0
         period = 0 if pct <= 0 else (0.48 if pct >= 0.9 else 0.72 if pct >= 0.7 else 1.0 if pct >= 0.45 else 1.35)
         # ≥50ms/帧 (perf_log 实证: 33ms 的半透明小控件重绘会以同节奏拖整窗刷新,
         # 连接设备后从启动持续到退出 —— "整体一直卡"的元凶)
         from . import motion
-        if getattr(self, '_fast_mode', False) or motion.reduced_motion():
+        if not self.isVisible() or getattr(self, '_fast_mode', False) or motion.reduced_motion():
             self._timer.stop()               # 流畅优先/无障碍: 图标静止
             return
-        if period and not self._timer.isActive():
-            self._timer.start(max(50, int(period * 1000 / 24)))
-        elif not period:
+        if period:
+            interval = max(50, int(period * 1000 / 24))
+            if self._timer.interval() != interval:
+                self._timer.setInterval(interval)
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
             self._timer.stop()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self.sync_motion()
+
+    def hideEvent(self, ev):
+        self._timer.stop()
+        super().hideEvent(ev)
 
     def _tick(self):
         self.angle = (self.angle + 15) % 360
@@ -547,8 +603,24 @@ class Toggle(QWidget):
     def setChecked(self, on: bool):
         if on != self.checked:
             self.checked = on
-            if not self._timer.isActive():
-                self._timer.start(14)
+            self.sync_motion()
+
+    def sync_motion(self):
+        from . import motion
+        if motion.reduced_motion() or not self.isVisible():
+            self._timer.stop()
+            self._pos = 1.0 if self.checked else 0.0
+            self.update()
+        elif self._pos != (1.0 if self.checked else 0.0) and not self._timer.isActive():
+            self._timer.start(14)
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self.sync_motion()
+
+    def hideEvent(self, ev):
+        super().hideEvent(ev)
+        self.sync_motion()
 
     def set_dark(self, dark: bool):
         """主题切换: 轨道色跟随主题主色 (深色橙 / 浅色蓝)。apply_theme 全局遍历调用。"""

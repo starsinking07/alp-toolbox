@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import CancelledError
 import queue
 import threading
 import time
@@ -38,23 +39,48 @@ class TransportBLE:
         self._closed = False
         self._mtu_warned = False             # MTU 超限一次性告警 flag (审计 G21)
         self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
         self._thread = threading.Thread(target=self._loop_main, daemon=True)
         self._thread.start()
 
     # ---- asyncio 循环线程 ----
     def _loop_main(self):
-        self._loop.run_forever()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            self._loop.close()
 
-    def _sched(self, coro, timeout: float = 20.0):
+    def _sched(self, coro, timeout: float = 20.0, cancel_event=None):
         """在 loop 线程执行协程并同步等待结果"""
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return fut.result(timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                fut.cancel()
+                raise CancelledError()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                fut.cancel()
+                raise TimeoutError('BLE operation timed out')
+            try:
+                return fut.result(timeout=min(remaining, 0.1))
+            except TimeoutError:
+                if fut.done():
+                    return fut.result()  # Preserve an exception raised by the operation.
 
     # ---- 连接 ----
-    def connect(self, timeout: float = 45.0) -> bool:
+    def connect(self, timeout: float = 45.0, cancel_event=None) -> bool:
         t0 = time.time()
-        ok = self._sched(self._connect_coro(timeout), timeout=timeout + 10)
+        try:
+            ok = self._sched(self._connect_coro(timeout), timeout=timeout + 10,
+                             cancel_event=cancel_event)
+        except CancelledError:
+            return False
         if ok:
             print(f'[ble] 已连接 {self.address}')
         else:

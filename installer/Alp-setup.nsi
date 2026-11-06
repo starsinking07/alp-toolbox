@@ -3,14 +3,20 @@ ManifestDPIAware true
 
 !include "MUI2.nsh"
 !define APP_NAME "Alp 工具箱"
-; 版本单源: 默认 0.1.5, 发布构建经 makensis /DAPP_VERSION=x.y.z 覆盖 (见 tools/build_release.cmd)
+; 发布构建经 tools/build_release.py 注入版本、通道及规范安装包名称。
 !ifndef APP_VERSION
-!define APP_VERSION "0.1.5"
+!define APP_VERSION "0.2.1"
 !endif
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Alp Toolbox"
 
 Name "${APP_NAME} ${APP_VERSION}"
-OutFile "..\dist\Alp工具箱-setup-v${APP_VERSION}.exe"
+!ifndef SETUP_OUT
+!define SETUP_OUT "..\dist\Alp-toolbox-setup-v${APP_VERSION}-release.exe"
+!endif
+!ifndef APP_BINARY_PATH
+!define APP_BINARY_PATH "..\dist\Alp工具箱.exe"
+!endif
+OutFile "${SETUP_OUT}"
 InstallDir "$PROGRAMFILES64\${APP_NAME}"
 InstallDirRegKey HKLM "${UNINST_KEY}" "InstallLocation"
 RequestExecutionLevel admin
@@ -58,7 +64,7 @@ Section "Install"
     MessageBox MB_ICONSTOP|MB_OK "无法替换 Alp工具箱.exe。$\r$\n$\r$\n常见原因:$\r$\n  · 程序还在运行 —— 请在托盘图标上右键「退出」$\r$\n  · 正在玩带反作弊的游戏 (如三角洲 ACE) —— 它会锁住可执行文件, 请先退出游戏$\r$\n  · 杀毒软件正在扫描 —— 稍等片刻重试$\r$\n$\r$\n处理完后点「重试」即可继续安装。"
     Abort
   ${EndIf}
-  File "..\dist\Alp工具箱.exe"
+  File /oname=Alp工具箱.exe "${APP_BINARY_PATH}"
   File "..\README.md"
   File "..\LICENSE"
   ; PawnIO (CPU 温度驱动): 服务已存在则跳过

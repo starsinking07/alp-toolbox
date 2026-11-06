@@ -127,6 +127,8 @@ class Config:
     # 挡位预设
     presets: dict = field(default_factory=lambda: dict(DEFAULT_PRESETS))
     autostart_minimized: bool = False
+    page_motion_preview: bool = False    # 可选切页预览；默认保留轻量切换
+    motion_fast_mode: bool = False       # 用户选择的流畅优先；系统动效偏好独立生效
     # 灯效模式编码语义版本: 1 = 旧 (0x06=刷新 / 0x08=响应 —— 实为标反);
     # 2 = 定案 (0x06=响应 / 0x08=刷新, 见 PROTOCOL.md §11.4 D2)。
     # 载入旧配置时把场景方案里存的 light_mode 6/8 互换一次, 然后打版本号防重复迁移。
@@ -195,6 +197,8 @@ class Config:
         self.fixed_rpm = _clamp(self.fixed_rpm, 0, 4800, 1200)
         self.pre_curve_rpm = _clamp(self.pre_curve_rpm, 0, 4800, 0)
         self.autostart_minimized = bool(self.autostart_minimized)
+        self.page_motion_preview = bool(self.page_motion_preview)
+        self.motion_fast_mode = bool(self.motion_fast_mode)
         if self.rpm_trim_mode not in ('off', 'fixed', 'loop'):
             self.rpm_trim_mode = 'off'
         self.rpm_trim_offset = _clamp(self.rpm_trim_offset, -400, 400, -200)
@@ -353,8 +357,10 @@ class Config:
     def save(self):
         """原子写 (tmp + os.replace) + 线程锁: GUI 与 worker 并发保存不再交错损坏。"""
         try:
-            data = json.dumps(asdict(self), ensure_ascii=False, indent=1)
             with self._save_lock:
+                # Capture under the same lock as the write. An older caller must
+                # not serialize early, pause, then overwrite a newer saved value.
+                data = json.dumps(asdict(self), ensure_ascii=False, indent=1)
                 tmp = self.path() + '.tmp'
                 with open(tmp, 'w', encoding='utf-8') as f:
                     f.write(data)

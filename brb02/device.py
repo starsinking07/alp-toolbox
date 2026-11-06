@@ -66,19 +66,21 @@ class Brb02Device:
         self._rgb_cfg_ts = 0.0
 
     # ---- 连接 ----
-    def connect(self, timeout: float | None = None) -> bool:
+    def connect(self, timeout: float | None = None, cancel_event=None) -> bool:
         """timeout 仅蓝牙通道有意义: 扫描/连接最长等待秒数 (None=默认 45s)。"""
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         if self._t is not None:
             # 已连接: 检查底层是否仍存活
             try:
                 if self.conn_type == 'usb':
                     dev = find_device()
-                    if dev is None:
-                        return False
-                    # 重枚举检测 (审计 G15): bus/address 变化 = 旧句柄已失效的假连接,
-                    # 返回 False 走下方 disconnect → 重建, 防假连接死循环
-                    return (dev.bus, dev.address) == self._t.usb_addr
-                return self._t.is_connected
+                    if dev is not None and (dev.bus, dev.address) == self._t.usb_addr:
+                        return True
+                elif self._t.is_connected:
+                    return True
+                # A stale transport must fall through to disconnect/rebuild.
+                # Returning False here would retain it forever on every retry.
             except Exception:
                 pass
         try:
@@ -88,9 +90,15 @@ class Brb02Device:
         if self.conn_type == 'ble':
             from .transport_ble import TransportBLE
             self._t = TransportBLE(address=self.ble_address)
-            ok = self._t.connect(timeout=timeout or 45.0)
+            try:
+                ok = self._t.connect(timeout=timeout or 45.0, cancel_event=cancel_event)
+            except Exception:
+                self.disconnect()
+                raise
             if ok:
                 self.ble_address = self._t.address
+            else:
+                self.disconnect()
             return ok
         dev = find_device()
         if dev is None:

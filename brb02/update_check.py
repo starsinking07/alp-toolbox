@@ -15,6 +15,7 @@ import os
 import re
 import time
 import urllib.parse
+from .release_naming import setup_filename
 from typing import Optional
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
@@ -29,7 +30,7 @@ RELEASES_URL = REPO_URL + '/releases'
 LATEST_URL = RELEASES_URL + '/latest'
 API_RELEASES_URL = f'https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases?per_page=10'
 EXPANDED_ASSETS_URL = RELEASES_URL + '/expanded_assets/'   # + tag: 附件真实直链碎片页
-SETUP_PREFIX = 'Alp工具箱-setup'          # 安装包附件命名前缀 (spec OutFile)
+SETUP_PREFIX = 'Alp-toolbox-setup'
 USER_AGENT = 'Alp-Toolbox-Updater'
 
 
@@ -61,8 +62,10 @@ def is_newer(latest: str, current: str) -> bool:
 
 
 def setup_asset_name(version: str) -> str:
-    """'0.1.5' → 'Alp工具箱-setup-v0.1.5.exe' (与 Release 附件命名一致)。"""
-    return f'{SETUP_PREFIX}-v{version}.exe'
+    """Canonical new releases; keep URL fallback compatible with older assets."""
+    if parse_version(version) < (0, 2, 1):
+        return f'Alp工具箱-setup-v{version}.exe'
+    return setup_filename(version)
 
 
 def setup_download_url(version: str) -> str:

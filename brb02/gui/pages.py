@@ -1965,6 +1965,17 @@ class ControlPage(QWidget):
             1 if getattr(cfg, 'titlebar_btn', 'thin') == 'normal' else 0)
         self.cmb_btn_style.currentIndexChanged.connect(self._btn_style_changed)
         cv3.addWidget(_setting_row('标题栏按钮', '右上角窗口按钮的粗细档位', '➖', self.cmb_btn_style))
+        self.tgl_fast_motion = Toggle(cfg.motion_fast_mode)
+        self.tgl_fast_motion.toggled = lambda on: self.ctx['main']._set_fast_mode(on)
+        cv3.addWidget(_setting_row('流畅优先', '关闭切页、仪表追赶等动态效果；设备控制继续运行', '⚡', self.tgl_fast_motion))
+        self.tgl_page_motion = Toggle(cfg.page_motion_preview)
+        self.tgl_page_motion.toggled = lambda on: self.ctx['main']._set_page_preview(on)
+        cv3.addWidget(_setting_row('丝滑切页（实验）', '页面淡入淡出与轻微位移；流畅优先开启时暂停', '✨', self.tgl_page_motion))
+        self.lbl_motion_state = QLabel()
+        self.lbl_motion_state.setObjectName('RowDesc')
+        self.lbl_motion_state.setWordWrap(True)
+        cv3.addWidget(self.lbl_motion_state)
+        self.sync_motion_preferences()
         self.tgl_hotkey = Toggle(cfg.hotkeys_enabled)
         self.tgl_hotkey.toggled = self._hotkey_toggled
         cv3.addWidget(_setting_row('全局快捷键', 'Ctrl+Alt+F1 循环挡位 · Ctrl+Alt+F2 智能变频 · Ctrl+Alt+F3 性能浮窗', '⌨️', self.tgl_hotkey))
@@ -2591,6 +2602,21 @@ class ControlPage(QWidget):
         self.ctx['cfg'].auto_switch = on
         self.ctx['cfg'].save()
 
+    def sync_motion_preferences(self):
+        """Toggle.setChecked only fills UI; it does not call its toggled callback."""
+        cfg = self.ctx['cfg']
+        self.tgl_fast_motion.setChecked(cfg.motion_fast_mode)
+        self.tgl_page_motion.setChecked(cfg.page_motion_preview)
+        if cfg.motion_fast_mode:
+            text = '当前：流畅优先，切页与装饰动效已暂停。'
+        elif motion.reduced_motion():
+            text = '当前：已遵循系统或启动时的减少动态效果设置。'
+        elif cfg.page_motion_preview:
+            text = '当前：丝滑切页已开启；绘制繁忙时自动使用轻量切换。'
+        else:
+            text = '当前：使用轻量切页。'
+        self.lbl_motion_state.setText(text)
+
     def _theme_changed(self, idx):
         self.ctx['cfg'].dark = (idx == 1)
         self.ctx['cfg'].save()
@@ -2612,9 +2638,9 @@ class ControlPage(QWidget):
     def _autostart_exe(self) -> str:
         """要注册的自启动目标: 冻结 exe 直启; 源码模式 = python + main.py。"""
         if getattr(sys, 'frozen', False):
-            return sys.executable
+            return subprocess.list2cmdline([sys.executable])
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        return f'"{sys.executable}" "{os.path.join(root, "main.py")}"'
+        return subprocess.list2cmdline([sys.executable, os.path.join(root, 'main.py')])
 
     def _get_autostart(self, force: bool = False) -> bool:
         """任务计划 AlpToolbox 存在 (RL HIGHEST, 登录静默提权) 即视为开启。
@@ -2661,14 +2687,13 @@ class ControlPage(QWidget):
         try:
             if on:
                 exe = self._autostart_exe()
-                # v3.64 修复: --tray 必须在引号外 —— 之前把 flag 拼进了被引号包裹的
-                # "程序路径"里, 任务执行的程序名变成 "...\Alp工具箱.exe --tray"
-                # (不存在的文件) → 开机自启动静默失效
                 tray = ' --tray' if getattr(self.ctx['cfg'], 'autostart_minimized', False) else ''
-                cmd = (f'schtasks /Create /F /TN "{self._AUTOSTART_TASK}" '
-                       f'/SC ONLOGON /RL HIGHEST /TR "\\"{exe}\\"{tray}"')
+                # /TR is one argument containing a separately quoted command line.
+                # Let subprocess escape the outer argv; do not quote it twice.
+                cmd = ['schtasks', '/Create', '/F', '/TN', self._AUTOSTART_TASK,
+                       '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/TR', exe + tray]
             else:
-                cmd = f'schtasks /Delete /F /TN "{self._AUTOSTART_TASK}"'
+                cmd = ['schtasks', '/Delete', '/F', '/TN', self._AUTOSTART_TASK]
             r = subprocess.run(cmd, capture_output=True, creationflags=0x08000000)
             if r.returncode == 0:
                 self._autostart_cache = bool(on)

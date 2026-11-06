@@ -309,11 +309,14 @@ class PerformanceOverlay(QWidget):
             self.hide()
         self.enabledChanged.emit(on)
 
-    def shutdown(self) -> None:
+    def shutdown(self, wait: bool = True) -> None:
         """应用退出时调用: 停定时器并彻底终止 PresentMon 子进程。"""
         self._timer.stop()
         self._top_timer.stop()
-        self.fps_monitor.shutdown()
+        if wait:
+            self.fps_monitor.shutdown()
+        else:
+            self.fps_monitor.request_running(False)
         self.hide()
 
     def _assert_topmost(self) -> None:

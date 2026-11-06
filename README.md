@@ -7,14 +7,16 @@ Python + PySide6,支持 **USB / 蓝牙 BLE 双通道**(自动切换),通信协�
 
 **作者:苏晓沉(StarSinking)**
 
-## 0.2.1-beta 测试进度（2026-11-01）
+## 0.2.1 正式版（2026-11-06）
 
-性能浮窗与 FPS 采集进入 Beta 群测。本轮修复采集线程重叠、浮窗启停卡顿、
-空闲误重启、FPS 慢帧统计、低帧目标选取、下载落盘校验及预发布版本比较等问题。
-开发工作区默认自检 **25/25 通过**，新增 Beta 回归组含 14 个测试方法。
-真实游戏、设备与反作弊兼容性仍需测试，详见 [Beta 测试说明](RELEASE-NOTES-v0.2.1-beta.md)。
+正式版安装包：[Alp-toolbox-setup-v0.2.1-release.exe](https://github.com/starsinking07/alp-toolbox/releases/tag/v0.2.1)。
 
-已安装旧同号 Beta 的用户请手动安装本次 setup。最近稳定版仍可通过正式版下载通道获取。
+修复 USB/BLE 断线重连、情景与温度墙优先级、关闭情景后的状态恢复、退出等待、
+配置并发保存、切页旧快照及源码自启动路径问题；系统设置和托盘的动效开关同步保存。
+修正 QtCore 打包时混入错误 ICU DLL 的启动兼容问题。
+
+正式版与 Beta 使用独立标签及附件；后续正式版统一命名为 `Alp-toolbox-setup-vX.Y.Z-release.exe`。
+详见 [正式版发布说明](RELEASE-NOTES-v0.2.1.md)。实际设备及游戏兼容性仍欢迎反馈。
 
 ## 关于开发方式
 
@@ -55,7 +57,7 @@ Python + PySide6,支持 **USB / 蓝牙 BLE 双通道**(自动切换),通信协�
 
 ### 安装版(推荐)
 
-从 Release 页下载 `Alp工具箱-setup-vX.Y.Z.exe`,双击安装:
+从 Release 页下载 `Alp-toolbox-setup-vX.Y.Z-release.exe`,双击安装:
 
 - 安装器已集成 [PawnIO](https://github.com/hirschmann/pawnio) 驱动,装完 CPU 温度即可用
 - 内置「检查更新」,关于页可一键下载新版本安装包

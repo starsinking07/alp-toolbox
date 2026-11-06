@@ -10,6 +10,12 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Diagnostic path runs before the GUI/controller imports, single-instance pipe,
+# elevation and device connections. It also records Qt import failures.
+if __name__ == '__main__' and '--startup-check' in sys.argv:
+    from brb02.startup_check import run_cli
+    raise SystemExit(run_cli())
+
 from PySide6.QtCore import QEvent, QObject, QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
